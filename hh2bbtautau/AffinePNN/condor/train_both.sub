@@ -1,0 +1,31 @@
+# ==============================================================================
+# CERN HTCondor Submit File — Treinamento Completo: AffinePNN + DNN_AN
+# Submeter a partir da raiz do projeto no lxplus:
+#   mkdir -p outputs/logs
+#   condor_submit condor/train_both.sub
+# ==============================================================================
+
+PROJECT_DIR   = $ENV(PWD)
+EOS_PARQUETS  = /eos/user/m/mgeralde/Analysis_hh2bbtautau/PNN/processed_data/parquet
+EOS_OUTPUTS   = /eos/user/m/mgeralde/Analysis_hh2bbtautau/PNN/affinepnn_outputs
+
+executable    = $(PROJECT_DIR)/condor/run_job.sh
+arguments     = $(PROJECT_DIR) scripts/train.py --config configs/default.yaml --models affine dnn_an --parquet-dir $(EOS_PARQUETS) --output-dir $(EOS_OUTPUTS)
+
+output        = $(PROJECT_DIR)/outputs/logs/condor_train_both.$(ClusterId).$(ProcId).out
+error         = $(PROJECT_DIR)/outputs/logs/condor_train_both.$(ClusterId).$(ProcId).err
+log           = $(PROJECT_DIR)/outputs/logs/condor_train_both.$(ClusterId).log
+
+# Recursos no cluster CERN (1 GPU Tesla T4/V100/A100, 4 CPUs e 16 GB de RAM p/ ~9.4M eventos)
+request_gpus   = 1
+request_cpus   = 4
+request_memory = 16GB
+
+# Flavour "tomorrow" = até 24h (40 épocas x 2 modelos leva ~1h15m em Tesla T4)
++JobFlavour    = "tomorrow"
+
+# Encaminha credencial Kerberos para leitura/escrita direta no /eos/user/...
+getenv         = False
++SendCredential = True
+
+queue 1

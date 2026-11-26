@@ -1,0 +1,29 @@
+# ==============================================================================
+# CERN HTCondor Submit File — Treinamento em Paralelo (1 GPU por arquitetura)
+# Submete simultaneamente AffinePNN, DNN_AN e PNN_Concat em nós separados!
+# Submeter da raiz do projeto no lxplus:
+#   condor_submit condor/train_single.sub
+# ==============================================================================
+
+PROJECT_DIR   = $ENV(PWD)
+EOS_PARQUETS  = /eos/user/m/mgeralde/Analysis_hh2bbtautau/PNN/processed_data/parquet
+EOS_OUTPUTS   = /eos/user/m/mgeralde/Analysis_hh2bbtautau/PNN/affinepnn_outputs
+
+executable    = $(PROJECT_DIR)/condor/run_job.sh
+arguments     = $(PROJECT_DIR) scripts/train.py --config configs/default.yaml --models $(MODEL_KEY) --parquet-dir $(EOS_PARQUETS) --output-dir $(EOS_OUTPUTS) --skip-eval
+
+output        = $(PROJECT_DIR)/outputs/logs/condor_train_$(MODEL_KEY).$(ClusterId).$(ProcId).out
+error         = $(PROJECT_DIR)/outputs/logs/condor_train_$(MODEL_KEY).$(ClusterId).$(ProcId).err
+log           = $(PROJECT_DIR)/outputs/logs/condor_train_$(MODEL_KEY).$(ClusterId).log
+
+request_gpus   = 1
+request_cpus   = 4
+request_memory = 16GB
++JobFlavour    = "workday"
++SendCredential = True
+
+queue MODEL_KEY in (
+    affine
+    dnn_an
+    pnn_concat
+)

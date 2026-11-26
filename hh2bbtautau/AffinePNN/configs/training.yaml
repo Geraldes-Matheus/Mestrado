@@ -1,0 +1,84 @@
+# ==============================================================================
+# Configuração de Dados, Amostragem (AN 5.3.5), Treino (AN 5.3.4/5.3.6) e Avaliação
+# ==============================================================================
+
+seed: 42
+
+paths:
+  # No lxplus/Condor aponta para o EOS; pode ser sobrescrito via --set paths.parquet_dir=...
+  # ou variável de ambiente HH_PARQUET_DIR
+  parquet_dir: "/eos/user/m/mgeralde/Analysis_hh2bbtautau/PNN/processed_data/parquet"
+  output_dir: "./outputs"
+
+data:
+  eras: ["22pre", "22post", "23pre", "23post"]
+  groups: ["dy", "tt", "hh_ggf_kl0", "hh_ggf_kl1", "hh_ggf_kl2p45", "hh_ggf_kl5"]
+  max_events_per_file: 1000000    # null = lê todos os eventos de cada arquivo parquet
+  chunk_size: 200000
+  split_fractions:
+    train: 0.60
+    val: 0.20
+    test: 0.20
+
+physics:
+  class_labels:
+    0: "DY"
+    1: "ttbar"
+    2: "HH"
+  kappa_map:
+    hh_ggf_kl0: 0.0
+    hh_ggf_kl1: 1.0
+    hh_ggf_kl2p45: 2.45
+    hh_ggf_kl5: 5.0
+
+sampling:
+  # AN-25-103 Seção 5.3.5: classes igualmente representadas em cada mini-batch (1/3 cada)
+  class_batch_fraction:
+    0: 0.3333333333333333
+    1: 0.3333333333333333
+    2: 0.3333333333333333
+  quota_weight_mode: "signed"     # "signed" (max(sum(w), 0) = seção de choque líquida) | "pos" | "abs"
+  quota_min_one: false            # AN 5.3.5: piso de >= 1 evento por subprocesso pequeno
+  bkg_kappa_distribution: "identical_sampled"  # Artigo AffinePNN Seção 4.2: sorteia do grid do sinal a cada batch
+  val_freq_clip: null             # AN 5.3.6: sem clip nos pesos de frequência da validação (ex: 20 limita caudas)
+
+training:
+  models_to_train: ["affine", "dnn_an"]
+  batch_size: 2048
+  epochs: 40                      # AN 5.3.6: 40 épocas x 5000 steps = 200.000 updates
+  steps_per_epoch: 5000
+  learning_rate: 0.1              # AN 5.3.6: lr inicial = 0.1 com BatchNorm + AdamW
+  lr_halve_every_epochs: 2        # AN 5.3.6: cai pela metade a cada 2 épocas
+  an_decay_factor: 500.0          # AN 5.3.4: weight_decay = 500 / n_pesos_lineares (apenas kernels Dense an_*)
+  use_cosine_decay: false         # Experimento opcional fora da AN
+  es_patience: 10                 # AN 5.3.6: early stopping após 10 épocas sem melhora na val_loss
+  lr_patience: 2
+  lr_factor: 0.5
+  min_lr: 1.0e-6
+  verbose: "auto"                 # "auto" -> 1 em terminal interativo/notebook, 2 em batch (HTCondor)
+
+evaluation:
+  eval_batch_size: 8192
+  eval_split: "val"               # "val" durante desenvolvimento; "test" APENAS na avaliação final congelada
+  final_eval: false
+  threshold: 0.5
+  n_boot: 100
+  sig_eff_points: [0.5, 0.8]
+  kappa_scan_range: [-2.0, 8.0, 41]   # [min, max, n_points] para varredura contínua em kappa_lambda
+  precision_mode: "balanced"      # "balanced": ε_S/(ε_S+ε_B) | "physical": S/(S+B) com w_phys
+  reference_model: "AffinePNN"    # rede "pura" nos plots de desempenho
+  baseline_model: "DNN_AN"        # rede de comparação (null para desativar)
+
+export:
+  enabled_after_training: true    # true -> scripts/train.py exporta pacotes completos ao final do treino
+  dir: "exported_models"          # relativo a paths.output_dir
+  onnx_opset: 17
+
+studies:
+  run_random_label_test: false
+  random_label_seeds: [1, 2, 3]
+  random_label_epochs: 20
+  run_interpolation_study: false
+  held_out_kappa: 2.45
+  run_seed_study: false
+  seeds_for_study: [1, 2, 3]

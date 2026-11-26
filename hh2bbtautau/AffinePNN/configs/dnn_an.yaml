@@ -1,0 +1,26 @@
+# ==============================================================================
+# Arquitetura Baseline: DNN da AN-25-103 (Single-NN sem condicionamento em kappa_lambda)
+# Mesmo backbone LBN + DenseNet, mesmas quotas, sem AffineConditioning
+# ==============================================================================
+
+name: "DNN_AN"
+kind: "none"                    # Grafo ignora kappa_lambda (multiplicado por kernel fixo em zero)
+backbone: "an_densenet"
+
+lbn_n: 5
+lbn_m: 10
+use_asinh_lbn: false
+asinh_scale: 100.0
+
+embed_dim: 5
+hidden_units: [128, 128, 128, 128, 128, 128, 128, 128]
+dropout_rate: 0.0
+use_layernorm: false
+
+l2_weight: 0.0
+l2_bias: 0.0
+l2_conditioning: 0.0
+
+# null = mistura os 4 valores de kappa_lambda no sinal em quotas iguais (AN 5.3.1)
+# Ex.: [1.0] treinaria uma rede individual apenas no SM (kappa_lambda = 1)
+train_kappas: null

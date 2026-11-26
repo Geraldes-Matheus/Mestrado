@@ -1,0 +1,38 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Data files (Parquets live on EOS or local data/)
+data/*.parquet
+data/synthetic/
+
+# Outputs (models, predictions, Condor logs, heavy plots/metrics)
+outputs/checkpoints/*
+!outputs/checkpoints/.gitkeep
+outputs/logs/*
+!outputs/logs/.gitkeep
+outputs/metrics/*
+!outputs/metrics/.gitkeep
+outputs/plots/*
+!outputs/plots/.gitkeep
+outputs/predictions/*
+!outputs/predictions/.gitkeep
+
+# HTCondor temporary files
+condor/*.log
+condor/*.out
+condor/*.err
+*.condor.log

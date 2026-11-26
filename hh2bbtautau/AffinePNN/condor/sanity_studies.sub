@@ -1,0 +1,31 @@
+# ==============================================================================
+# CERN HTCondor Submit File — Job Array de Estudos de Estabilidade por Seed (13.6)
+# Cada job treina AffinePNN + DNN_AN para uma seed distinta em paralelo!
+# Submeter da raiz do projeto no lxplus:
+#   condor_submit condor/sanity_studies.sub
+# ==============================================================================
+
+PROJECT_DIR   = $ENV(PWD)
+EOS_PARQUETS  = /eos/user/m/mgeralde/Analysis_hh2bbtautau/PNN/processed_data/parquet
+EOS_OUTPUTS   = /eos/user/m/mgeralde/Analysis_hh2bbtautau/PNN/affinepnn_outputs
+
+executable    = $(PROJECT_DIR)/condor/run_job.sh
+arguments     = $(PROJECT_DIR) scripts/sanity_studies.py --config configs/default.yaml --study seeds --seeds $(STUDY_SEED) --parquet-dir $(EOS_PARQUETS) --output-dir $(EOS_OUTPUTS)
+
+output        = $(PROJECT_DIR)/outputs/logs/condor_seed_$(STUDY_SEED).$(ClusterId).$(ProcId).out
+error         = $(PROJECT_DIR)/outputs/logs/condor_seed_$(STUDY_SEED).$(ClusterId).$(ProcId).err
+log           = $(PROJECT_DIR)/outputs/logs/condor_seeds.$(ClusterId).log
+
+request_gpus   = 1
+request_cpus   = 4
+request_memory = 16GB
++JobFlavour    = "tomorrow"
++SendCredential = True
+
+queue STUDY_SEED in (
+    101
+    102
+    103
+    104
+    105
+)

@@ -1,0 +1,117 @@
+# ==============================================================================
+# Features da Tabela 29 da AN-25-103 (Seção 5.3.2 — ggF HH -> bbtautau)
+# 49 variáveis contínuas + 7 variáveis categóricas
+# ==============================================================================
+
+weight_col: "normalization_weight"
+
+meta_columns:
+  - "kappa_lambda"
+  - "normalization_weight"
+  - "label"
+  - "sample"
+
+# Valores-sentinela exatos que devem ser convertidos para NaN nas contínuas
+sentinels:
+  - -99999.0
+  - -9999.0
+  - -999.0
+
+# Colunas de covariância da MET que recebem compressão sign(x) * log1p(|x|)
+cov_cols:
+  - "reg_dnn_moe_met_cov00"
+  - "reg_dnn_moe_met_cov01"
+  - "reg_dnn_moe_met_cov11"
+
+# Objetos opcionais: quando a flag categórica == 0, as contínuas correspondentes
+# são marcadas como NaN antes de estimar média/desvio no treino
+missing_object_masks:
+  reg_dnn_moe_has_jet_pair: "reg_dnn_moe_bjet2_"
+  reg_dnn_moe_has_fatjet: "reg_dnn_moe_fatjet_"
+
+# Partículas cujos 4-vetores (e, px, py, pz) alimentam a Lorentz Boost Network (LBN)
+lbn_particles:
+  - "vis_tau1"
+  - "vis_tau2"
+  - "bjet1"
+  - "bjet2"
+  - "fatjet"
+
+continuous_features:
+  - "reg_dnn_moe_met_px"
+  - "reg_dnn_moe_met_py"
+  - "reg_dnn_moe_met_cov00"
+  - "reg_dnn_moe_met_cov01"
+  - "reg_dnn_moe_met_cov11"
+  - "reg_dnn_moe_vis_tau1_e"
+  - "reg_dnn_moe_vis_tau1_px"
+  - "reg_dnn_moe_vis_tau1_py"
+  - "reg_dnn_moe_vis_tau1_pz"
+  - "reg_dnn_moe_vis_tau2_e"
+  - "reg_dnn_moe_vis_tau2_px"
+  - "reg_dnn_moe_vis_tau2_py"
+  - "reg_dnn_moe_vis_tau2_pz"
+  - "reg_dnn_moe_bjet1_e"
+  - "reg_dnn_moe_bjet1_px"
+  - "reg_dnn_moe_bjet1_py"
+  - "reg_dnn_moe_bjet1_pz"
+  - "reg_dnn_moe_bjet1_tag_b"
+  - "reg_dnn_moe_bjet1_tag_cvsb"
+  - "reg_dnn_moe_bjet1_tag_cvsl"
+  - "reg_dnn_moe_bjet1_hhbtag"
+  - "reg_dnn_moe_bjet2_e"
+  - "reg_dnn_moe_bjet2_px"
+  - "reg_dnn_moe_bjet2_py"
+  - "reg_dnn_moe_bjet2_pz"
+  - "reg_dnn_moe_bjet2_tag_b"
+  - "reg_dnn_moe_bjet2_tag_cvsb"
+  - "reg_dnn_moe_bjet2_tag_cvsl"
+  - "reg_dnn_moe_bjet2_hhbtag"
+  - "reg_dnn_moe_fatjet_e"
+  - "reg_dnn_moe_fatjet_px"
+  - "reg_dnn_moe_fatjet_py"
+  - "reg_dnn_moe_fatjet_pz"
+  - "reg_dnn_moe_htt_e"
+  - "reg_dnn_moe_htt_px"
+  - "reg_dnn_moe_htt_py"
+  - "reg_dnn_moe_htt_pz"
+  - "reg_dnn_moe_hbb_e"
+  - "reg_dnn_moe_hbb_px"
+  - "reg_dnn_moe_hbb_py"
+  - "reg_dnn_moe_hbb_pz"
+  - "reg_dnn_moe_htthbb_e"
+  - "reg_dnn_moe_htthbb_px"
+  - "reg_dnn_moe_htthbb_py"
+  - "reg_dnn_moe_htthbb_pz"
+  - "reg_dnn_moe_httfatjet_e"
+  - "reg_dnn_moe_httfatjet_px"
+  - "reg_dnn_moe_httfatjet_py"
+  - "reg_dnn_moe_httfatjet_pz"
+
+categorical_features:
+  - "reg_dnn_moe_pair_type"
+  - "reg_dnn_moe_dm1"
+  - "reg_dnn_moe_dm2"
+  - "reg_dnn_moe_vis_tau1_charge"
+  - "reg_dnn_moe_vis_tau2_charge"
+  - "reg_dnn_moe_has_jet_pair"
+  - "reg_dnn_moe_has_fatjet"
+
+categorical_domains:
+  reg_dnn_moe_pair_type: [0, 1, 2]
+  reg_dnn_moe_dm1: [-1, 0, 1, 10, 11]
+  reg_dnn_moe_dm2: [0, 1, 10, 11]
+  reg_dnn_moe_vis_tau1_charge: [-1, 0, 1]
+  reg_dnn_moe_vis_tau2_charge: [-1, 0, 1]
+  reg_dnn_moe_has_jet_pair: [0, 1]
+  reg_dnn_moe_has_fatjet: [0, 1]
+
+forbidden_substrings:
+  - "weight"
+  - "label"
+  - "kappa"
+  - "sample"
+  - "era"
+  - "group"
+  - "process"
+  - "file"

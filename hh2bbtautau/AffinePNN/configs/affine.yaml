@@ -1,0 +1,30 @@
+# ==============================================================================
+# Arquitetura AffinePNN (Anzalone et al., arXiv:2202.00424 + Backbone AN-25-103)
+# Dense(128) -> BN -> ELU -> AffineConditioning(kappa_lambda) em cada bloco DenseNet
+# ==============================================================================
+
+name: "AffinePNN"
+kind: "affine"                  # "affine" | "none" (DNN_AN) | "concat" (PNN simples)
+backbone: "an_densenet"         # "an_densenet" (LBN + DenseNet da AN) | "mlp" (MLP do artigo AffinePNN)
+
+# Camada LBN (AN-25-103 Seção 5.3.3: N = 5 partículas -> M = 10 combinações Lorentz-boosted)
+lbn_n: 5
+lbn_m: 10
+use_asinh_lbn: false            # Opcional (fora da AN): arcsinh(x / asinh_scale) antes da BN do LBN
+asinh_scale: 100.0
+
+# Embeddings de variáveis categóricas (AN-25-103 Seção 5.3.3: dimensão 5)
+embed_dim: 5
+
+# Blocos DenseNet (AN-25-103 Seção 5.3.3: 8 blocos de 128 neurônios com conexões densas)
+hidden_units: [128, 128, 128, 128, 128, 128, 128, 128]
+dropout_rate: 0.0               # AN (ggF): sem dropout
+use_layernorm: false            # Usado apenas se backbone == "mlp"
+
+# Regularização explícita de camada (na AN o weight decay fica no AdamW apenas nos kernels Dense)
+l2_weight: 0.0
+l2_bias: 0.0
+l2_conditioning: 0.0
+
+# Hipóteses de kappa_lambda usadas no sinal durante o treino (null = todos os 4 do grid)
+train_kappas: null

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hh-bbtautau-affinepnn"
+version = "0.1.0"
+description = "Affine Parametric Neural Network (AffinePNN) in kappa_lambda for CMS Run-3 HH -> bbtautau (ggF) vs AN-25-103 DNN baseline"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Mestrado UERJ - CMS HH->bbtautau" }
+]
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pyarrow>=12.0",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+    "matplotlib>=3.7",
+    "pyyaml>=6.0",
+    "tensorflow>=2.16",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+    "tf2onnx>=1.16",
+]
+
+[project.scripts]
+hh-train = "scripts.train:main"
+hh-evaluate = "scripts.evaluate:main"
+hh-inference = "scripts.inference:main"
+hh-sanity = "scripts.sanity_studies:main"
+hh-export = "scripts.export_model:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "scripts*"]

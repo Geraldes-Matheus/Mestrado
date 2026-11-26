@@ -1,0 +1,24 @@
+# ==============================================================================
+# Arquitetura de Referência: Vanilla PNN (Baldi et al. — kappa_lambda concatenado na entrada)
+# Útil para comparação de interpolação (Seção 13.5) contra o AffineConditioning
+# ==============================================================================
+
+name: "PNN_Concat"
+kind: "concat"
+backbone: "an_densenet"
+
+lbn_n: 5
+lbn_m: 10
+use_asinh_lbn: false
+asinh_scale: 100.0
+
+embed_dim: 5
+hidden_units: [128, 128, 128, 128, 128, 128, 128, 128]
+dropout_rate: 0.0
+use_layernorm: false
+
+l2_weight: 0.0
+l2_bias: 0.0
+l2_conditioning: 0.0
+
+train_kappas: null

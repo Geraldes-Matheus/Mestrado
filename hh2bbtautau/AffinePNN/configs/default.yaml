@@ -1,0 +1,12 @@
+# ==============================================================================
+# Manifesto Principal de Configuração do Projeto
+# Reúne os arquivos modulares de features, treino e arquiteturas
+# ==============================================================================
+
+includes:
+  training: "training.yaml"
+  features: "features.yaml"
+  models:
+    affine: "affine.yaml"
+    dnn_an: "dnn_an.yaml"
+    pnn_concat: "pnn_concat.yaml"
