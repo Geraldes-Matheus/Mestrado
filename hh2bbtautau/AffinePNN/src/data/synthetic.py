@@ -88,9 +88,13 @@ def generate_synthetic_parquets(
 
             hh_px, hh_py, hh_pz = htt_px + hbb_px, htt_py + hbb_py, htt_pz + hbb_pz
             hh_e = (htt_e + hbb_e).astype(np.float32)
+            for arr in (hbb_e, hbb_px, hbb_py, hbb_pz, hh_e, hh_px, hh_py, hh_pz):
+                arr[has_jet_pair == 0] = 0.0
 
             hfj_px, hfj_py, hfj_pz = htt_px + fj_px, htt_py + fj_py, htt_pz + fj_pz
             hfj_e = (htt_e + fj_e).astype(np.float32)
+            for arr in (hfj_e, hfj_px, hfj_py, hfj_pz):
+                arr[has_fatjet == 0] = 0.0
 
             # Pesos físicos com fração realista de pesos negativos NLO (~30% em DY, ~5% em HH, ~0.4% em ttbar)
             if label == 0:

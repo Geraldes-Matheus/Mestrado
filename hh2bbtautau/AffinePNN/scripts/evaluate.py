@@ -33,8 +33,11 @@ from src.evaluation.plotting import (
     plot_kappa_dependence,
     plot_kappa_response_heatmap,
     plot_metrics_bars_cmp,
+    plot_overtraining_distributions,
+    plot_physical_yields_and_significance,
     plot_roc_and_pr_grid,
     plot_roc_and_scores_cmp,
+    plot_signal_eff_vs_bkg_rejection,
     plot_significance_ratio,
     plot_threshold_tradeoff_combined,
     plot_threshold_tradeoff_panels,
@@ -122,11 +125,11 @@ def main() -> None:
     ev_inputs = make_inputs(ev_xc, ev_xk, ev_df["kappa_eval"].to_numpy(), kappa_norm=knorm)
     ev_y = ev_df["label"].to_numpy()
 
-    # Teste KS de Overtraining
+    # Teste KS e distribuição de Overtraining
     ks_frames = []
     for name, m in models.items():
         print(f"\nTeste KS (treino vs {args.split}) — {name}:")
-        ks_df = overtraining_ks(
+        ks_df, ks_scores = overtraining_ks(
             m,
             data.splits["train"],
             data.x_cont["train"],
@@ -137,9 +140,22 @@ def main() -> None:
             kappa_norm=knorm,
             batch_size=eval_bs,
             seed=cfg["seed"],
+            return_scores=True,
         )
         ks_df.insert(0, "modelo", name)
         ks_frames.append(ks_df)
+        if not args.no_plots:
+            plot_overtraining_distributions(
+                p_train=ks_scores["p_train"],
+                y_train=ks_scores["y_train"],
+                p_eval=ks_scores["p_eval"],
+                y_eval=ks_scores["y_eval"],
+                class_labels=cfg["physics"]["class_labels"],
+                model_name=name,
+                split_label=args.split,
+                save_path=split_plots_dir / f"overtraining_distributions_{name}_{args.split}.png",
+                show=False,
+            )
     if ks_frames:
         import pandas as pd
 
@@ -235,6 +251,15 @@ def main() -> None:
         )
         plot_significance_ratio(
             eval_res["scores"], kappas=kgrid, save_path=split_plots_dir / "significance_ratio_scan.png", show=False
+        )
+        plot_signal_eff_vs_bkg_rejection(
+            eval_res["scores"], kappas=kgrid, save_path=split_plots_dir / "signal_eff_vs_bkg_rejection.png", show=False
+        )
+        plot_physical_yields_and_significance(
+            eval_res["yields"],
+            eval_res["significance_ratio"],
+            save_path=split_plots_dir / "physical_yields_and_significance_cmp.png",
+            show=False,
         )
         for m_name, m in models.items():
             dep_df, _ = kappa_dependence(

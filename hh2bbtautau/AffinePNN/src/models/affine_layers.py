@@ -83,25 +83,77 @@ class TakeColumns(keras.layers.Layer):
 @keras.utils.register_keras_serializable(package="affinepnn")
 class FourVectorsFromFeatures(keras.layers.Layer):
     """Recupera os 4-vetores físicos (E, px, py, pz) desfazendo a padronização z-score
-    e zerando o fatjet quando `has_fatjet != 1`."""
+    e zerando explicitamente objetos ausentes antes de entregá-los à LBN:
+      - `bjet2` (slot `bjet2_slot`, padrão 3) é zerado quando `has_jet_pair != 1`;
+      - `fatjet` (slot `fatjet_slot`, padrão 4) é zerado quando `has_fatjet != 1`;
+      - `bjet1` (slot `bjet1_slot`, padrão 2) é zerado se `mask_bjet1_without_pair=True`
+        quando `has_jet_pair != 1`, ou se vier sem energia física (`E <= 1e-3`) quando `has_jet_pair != 1`.
 
-    def __init__(self, idx, mean, std, n_particles: int, fat_last: bool = True, **kwargs):
+    Mantém retrocompatibilidade automática caso receba apenas `[x, has_fatjet]` (checkpoints antigos).
+    """
+
+    def __init__(
+        self,
+        idx,
+        mean,
+        std,
+        n_particles: int,
+        fat_last: bool = True,
+        bjet1_slot: int | None = 2,
+        bjet2_slot: int | None = 3,
+        fatjet_slot: int | None = 4,
+        mask_bjet1_without_pair: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.idx = [int(i) for i in idx]
         self.mean = [float(m) for m in mean]
         self.std = [float(s) for s in std]
         self.n_particles = int(n_particles)
         self.fat_last = bool(fat_last)
+        self.bjet1_slot = None if bjet1_slot is None else int(bjet1_slot)
+        self.bjet2_slot = None if bjet2_slot is None else int(bjet2_slot)
+        self.fatjet_slot = (self.n_particles - 1 if fat_last else None) if fatjet_slot is None else int(fatjet_slot)
+        self.mask_bjet1_without_pair = bool(mask_bjet1_without_pair)
 
     def call(self, inputs):
         ops = keras.ops
-        x, has_fatjet = inputs
+        if len(inputs) == 3:
+            x, has_jet_pair, has_fatjet = inputs
+        else:
+            x, has_fatjet = inputs
+            has_jet_pair = None
+
         sel = ops.take(x, ops.convert_to_tensor(self.idx, dtype="int32"), axis=1)
         phys = sel * ops.convert_to_tensor(self.std, dtype="float32") + ops.convert_to_tensor(self.mean, dtype="float32")
         phys = ops.reshape(phys, (-1, self.n_particles, 4))
-        present = ops.reshape(ops.cast(ops.equal(has_fatjet, 1), "float32"), (-1, 1, 1))
-        is_fat = ops.convert_to_tensor([[[0.0]] * (self.n_particles - 1) + [[1.0]]], dtype="float32")
-        return phys * (1.0 - is_fat * (1.0 - present))
+
+        present_fat = ops.reshape(ops.cast(ops.equal(has_fatjet, 1), "float32"), (-1, 1))
+        ones = ops.ones_like(present_fat)
+        present_pair = (
+            ops.reshape(ops.cast(ops.equal(has_jet_pair, 1), "float32"), (-1, 1))
+            if has_jet_pair is not None
+            else ones
+        )
+
+        slot_masks = []
+        for p in range(self.n_particles):
+            if self.fatjet_slot is not None and p == self.fatjet_slot:
+                slot_masks.append(present_fat)
+            elif self.bjet2_slot is not None and p == self.bjet2_slot:
+                slot_masks.append(present_pair)
+            elif self.bjet1_slot is not None and p == self.bjet1_slot and has_jet_pair is not None:
+                if self.mask_bjet1_without_pair:
+                    slot_masks.append(present_pair)
+                else:
+                    # Se não há par AK4 e bjet1 também veio zerado (E <= 1e-3), garante 0 exato sem drift float32
+                    b1_has_energy = ops.cast(phys[:, p, 0:1] > 1e-3, "float32")
+                    slot_masks.append(ops.maximum(present_pair, b1_has_energy))
+            else:
+                slot_masks.append(ones)
+
+        mask = ops.expand_dims(ops.concatenate(slot_masks, axis=1), axis=-1)
+        return phys * mask
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0][0], self.n_particles, 4)
@@ -115,6 +167,10 @@ class FourVectorsFromFeatures(keras.layers.Layer):
                 "std": self.std,
                 "n_particles": self.n_particles,
                 "fat_last": self.fat_last,
+                "bjet1_slot": self.bjet1_slot,
+                "bjet2_slot": self.bjet2_slot,
+                "fatjet_slot": self.fatjet_slot,
+                "mask_bjet1_without_pair": self.mask_bjet1_without_pair,
             }
         )
         return cfg

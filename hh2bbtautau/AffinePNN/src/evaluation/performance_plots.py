@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 from src.evaluation.plotting import MODEL_COLORS, MODEL_STYLES, _finalize_fig
-from src.evaluation.roc import auc_from_roc, weighted_roc
+from src.evaluation.roc import auc_from_roc, prepare_non_negative_weights, weighted_roc
 
 ScoresDict = dict[str, dict[float, dict[str, np.ndarray]]]
 
@@ -96,36 +96,47 @@ def metrics_vs_score(
 ) -> dict[str, Any]:
     """Precision, Recall, F1, ε_B, rejeição e acurácia balanceada para cortes `s >= t`, t ∈ [0, 1].
 
-    Usa somas cumulativas (O(N log N)) e preserva pesos negativos de NLO nas somas.
+    - Em `mode="balanced"` (avaliação de classificação), utiliza pesos não-negativos `max(w, 0)`
+      validados por classe para garantir monotonicidade estrita de `recall(t)` e `eps_b(t)`.
+    - Em `mode="physical"`, reporta também rendimentos `S` e `B` com os pesos NLO assinados originais.
     """
     if mode not in ("balanced", "physical"):
         raise ValueError("mode deve ser 'balanced' ou 'physical'")
-    y_b = np.asarray(y).astype(bool)
+    y_b, w_pos, s_pos_tot, b_pos_tot = prepare_non_negative_weights(y, w)
     s_a = np.asarray(s, dtype=np.float64)
-    w_a = np.ones_like(s_a) if w is None else np.asarray(w, dtype=np.float64)
+    w_signed = np.ones_like(s_a) if w is None else np.asarray(w, dtype=np.float64)
 
     order = np.argsort(s_a, kind="mergesort")
     s_sorted = s_a[order]
-    sig_w = np.where(y_b, w_a, 0.0)[order]
-    bkg_w = np.where(~y_b, w_a, 0.0)[order]
-    cs_sig = np.r_[0.0, np.cumsum(sig_w)]
-    cs_bkg = np.r_[0.0, np.cumsum(bkg_w)]
-    s_tot, b_tot = cs_sig[-1], cs_bkg[-1]
+
+    sig_pos = np.where(y_b, w_pos, 0.0)[order]
+    bkg_pos = np.where(~y_b, w_pos, 0.0)[order]
+    cs_sig_pos = np.r_[0.0, np.cumsum(sig_pos)]
+    cs_bkg_pos = np.r_[0.0, np.cumsum(bkg_pos)]
+
+    sig_signed = np.where(y_b, w_signed, 0.0)[order]
+    bkg_signed = np.where(~y_b, w_signed, 0.0)[order]
+    cs_sig_signed = np.r_[0.0, np.cumsum(sig_signed)]
+    cs_bkg_signed = np.r_[0.0, np.cumsum(bkg_signed)]
+    s_signed_tot, b_signed_tot = cs_sig_signed[-1], cs_bkg_signed[-1]
 
     thr = np.linspace(0.0, 1.0, int(n_thr))
     n_below = np.searchsorted(s_sorted, thr, side="left")
-    S = s_tot - cs_sig[n_below]
-    B = b_tot - cs_bkg[n_below]
 
-    recall = np.clip(S / s_tot, 0.0, 1.0) if s_tot != 0 else np.zeros_like(thr)
-    eps_b = np.clip(B / b_tot, 0.0, 1.0) if b_tot != 0 else np.zeros_like(thr)
+    S_pos = s_pos_tot - cs_sig_pos[n_below]
+    B_pos = b_pos_tot - cs_bkg_pos[n_below]
+    S = s_signed_tot - cs_sig_signed[n_below]
+    B = b_signed_tot - cs_bkg_signed[n_below]
+
+    recall = np.clip(S_pos / s_pos_tot, 0.0, 1.0)
+    eps_b = np.clip(B_pos / b_pos_tot, 0.0, 1.0)
 
     if mode == "balanced":
         den = recall + eps_b
         precision = np.divide(recall, den, out=np.ones_like(den), where=den > 1e-12)
     else:
         den = S + B
-        precision = np.clip(np.divide(S, den, out=np.ones_like(den), where=np.abs(den) > 1e-30), 0.0, 1.0)
+        precision = np.clip(np.divide(S, den, out=np.ones_like(den), where=(S >= 0) & (B >= 0) & (den > 1e-30)), 0.0, 1.0)
 
     den_f1 = precision + recall
     f1 = np.divide(2.0 * precision * recall, den_f1, out=np.zeros_like(den_f1), where=den_f1 > 1e-12)
@@ -176,10 +187,12 @@ def working_point_table(
             d = _get(scores, n, k)
             c = metrics_vs_score(d["y"], d["s"], d["w"], n_thr=n_thr, mode=mode)
             fpr, tpr = weighted_roc(d["y"], d["s"], d["w"])
+            fpr_u, tpr_u = weighted_roc(d["y"], d["s"], None)
             b = c["best_idx"]
             row = {
                 "modelo": n,
                 "kappa": k,
+                "auc_unw": auc_from_roc(fpr_u, tpr_u),
                 "auc_w": auc_from_roc(fpr, tpr),
                 "best_thr_f1": c["best_thr"],
                 "best_f1": c["best_f1"],

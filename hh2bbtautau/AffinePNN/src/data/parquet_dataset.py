@@ -164,17 +164,22 @@ def clean_and_check_data_quality(
 
     missing_obj_info: dict[str, dict] = {}
     if missing_masks:
-        for flag, prefix in missing_masks.items():
+        for flag, prefixes_cfg in missing_masks.items():
             if flag in df.columns:
                 m = df[flag].to_numpy() == 0
-                cols = [c for c in continuous_features if c.startswith(prefix)]
+                prefixes = [prefixes_cfg] if isinstance(prefixes_cfg, str) else list(prefixes_cfg)
+                cols = [c for c in continuous_features if any(c.startswith(pfx) for pfx in prefixes)]
                 if m.any() and cols:
                     uniq_sample = np.unique(df.loc[m, cols[0]].dropna().to_numpy())[:5].tolist()
-                    missing_obj_info[flag] = {
+                    info_entry: dict[str, object] = {
                         "absent_fraction": float(m.mean()),
                         "sample_col": cols[0],
                         "unique_values_head": uniq_sample,
                     }
+                    if flag == "reg_dnn_moe_has_jet_pair" and "reg_dnn_moe_bjet1_e" in df.columns:
+                        b1_vals = df.loc[m, "reg_dnn_moe_bjet1_e"].dropna().to_numpy()
+                        info_entry["bjet1_zero_fraction_when_no_pair"] = float((b1_vals <= 0).mean()) if len(b1_vals) else 0.0
+                    missing_obj_info[flag] = info_entry
 
     if verbose:
         print(f"Inf nas contínuas: {n_inf}")

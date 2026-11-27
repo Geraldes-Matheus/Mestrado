@@ -13,7 +13,7 @@ from src.data.preprocessing import PreparedData, make_inputs
 from src.data.weights import make_eval_weights
 from src.evaluation.kappa_scan import compare_models_table, summarize_scores
 from src.evaluation.score_distributions import score_per_kappa
-from src.evaluation.significance import physical_yields, significance_ratio_table
+from src.evaluation.significance import compare_physical_yields, physical_yields, significance_ratio_table
 from src.training.losses import weighted_logloss
 
 
@@ -140,11 +140,15 @@ def run_full_evaluation(
             print(t[wp_cols].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
 
     comparison_df = None
+    yields_comparison_df = None
     if "AffinePNN" in tables and "DNN_AN" in tables:
         comparison_df = compare_models_table(tables["AffinePNN"], tables["DNN_AN"], "_A", "_AN")
+        yields_comparison_df = compare_physical_yields(yields_tables["AffinePNN"], yields_tables["DNN_AN"], "_A", "_AN")
         if verbose:
-            print("\n3. COMPARAÇÃO DIRETA AffinePNN (A) vs DNN da AN (AN) — ponderada:")
+            print("\n3. COMPARAÇÃO DIRETA AffinePNN (A) vs DNN da AN (AN) — classificação (w >= 0 + sem peso):")
             print(comparison_df.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+            print("\n4. COMPARAÇÃO DE RENDIMENTOS FÍSICOS E SIGNIFICÂNCIA DE ASIMOV (pesos NLO com sinal):")
+            print(yields_comparison_df.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
 
     if metrics_dir is not None:
         mdir = Path(metrics_dir)
@@ -168,6 +172,8 @@ def run_full_evaluation(
 
         if comparison_df is not None:
             comparison_df.to_csv(mdir / f"comparison_AffinePNN_vs_DNN_AN_{eval_split}.csv", index=False)
+        if yields_comparison_df is not None:
+            yields_comparison_df.to_csv(mdir / f"comparison_yields_AffinePNN_vs_DNN_AN_{eval_split}.csv", index=False)
 
     return {
         "split": eval_split,
@@ -175,6 +181,7 @@ def run_full_evaluation(
         "scores": scores,
         "tables": tables,
         "yields": yields_tables,
+        "yields_comparison": yields_comparison_df,
         "significance_ratio": sig_ratio_tables,
         "comparison": comparison_df,
     }

@@ -93,6 +93,7 @@ def main() -> None:
             cont_cols,
             cat_cols,
             sentinels=fcfg.get("sentinels", [-99999.0, -9999.0, -999.0]),
+            missing_masks=fcfg.get("missing_object_masks", {}),
             verbose=False,
         )
         apply_physical_preprocessing(
@@ -100,6 +101,7 @@ def main() -> None:
             continuous_features=cont_cols,
             cov_cols=fcfg.get("cov_cols", []),
             missing_masks=fcfg.get("missing_object_masks", {}),
+            mask_bjet1_always_on_no_pair=bool(fcfg.get("mask_bjet1_always_on_no_pair", False)),
         )
 
         x_cont = scaler.transform(df)

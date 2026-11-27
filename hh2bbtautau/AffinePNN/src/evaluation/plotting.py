@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src.evaluation.roc import auc_from_roc, compute_curves_for_kappa, weighted_roc
+from src.evaluation.roc import auc_from_roc, auc_unweighted, compute_curves_for_kappa, weighted_roc
 from src.evaluation.significance import ams_significance_scan
 
 MODEL_COLORS = {
@@ -115,8 +115,9 @@ def plot_roc_and_scores_cmp(
             for i, m_name in enumerate(model_names):
                 d = scores[m_name][k]
                 m = d["cls"] == c
-                h, _ = np.histogram(d["s"][m], bins=bins, weights=d["w"][m])
-                dens = np.maximum(h / max(abs(h.sum()), 1e-30) / bin_w, 1e-7)
+                w_pos = np.clip(d["w"][m], 0.0, None)
+                h, _ = np.histogram(d["s"][m], bins=bins, weights=w_pos)
+                dens = np.maximum(h / max(float(h.sum()), 1e-30) / bin_w, 1e-7)
                 short_m = "Affine" if m_name == "AffinePNN" else ("AN" if m_name == "DNN_AN" else m_name)
                 ls = MODEL_STYLES.get(m_name, ["-", "--", "-."][i % 3])
                 ax[1].step(
@@ -131,7 +132,7 @@ def plot_roc_and_scores_cmp(
 
         ax[1].set_yscale("log")
         ax[1].set_xlabel("P(HH)")
-        ax[1].set_ylabel("Densidade (pesos com sinal)")
+        ax[1].set_ylabel("Densidade (pesos não-negativos)")
         ax[1].set_title(f"Distribuição de P(HH) por classe, κ_λ = {k:g}")
         ax[1].legend(ncol=max(len(model_names), 2), fontsize=8.2)
         ax[1].grid(alpha=0.3)
@@ -645,12 +646,14 @@ def plot_roc_per_kappa_individual(
             d = scores[m_name][fk]
             fpr, tpr = weighted_roc(d["y"], d["s"], d["w"])
             auc_val = auc_from_roc(fpr, tpr)
+            auc_unw = auc_unweighted(d["y"], d["s"])
             col = MODEL_COLORS.get(m_name, f"C{i}")
             ls = MODEL_STYLES.get(m_name, "-")
+            lbl_m = f"{m_name} (AUC$_w$={auc_val:.4f} | AUC={auc_unw:.4f})"
 
-            ax[0].plot(fpr, tpr, color=col, ls=ls, lw=2.0, label=f"{m_name} (AUC$_w$ = {auc_val:.4f})")
+            ax[0].plot(fpr, tpr, color=col, ls=ls, lw=2.0, label=lbl_m)
             ax_ins.plot(fpr, tpr, color=col, ls=ls, lw=1.8)
-            ax[1].plot(tpr, np.clip(fpr, 1e-4, 1.0), color=col, ls=ls, lw=2.0, label=f"{m_name} (AUC$_w$ = {auc_val:.4f})")
+            ax[1].plot(tpr, np.clip(fpr, 1e-4, 1.0), color=col, ls=ls, lw=2.0, label=lbl_m)
 
         ax[0].plot([0, 1], [0, 1], "--", color="gray", lw=1.0, alpha=0.7)
         ax[0].set_xlabel(r"Taxa de Falso Positivo / Eficiência de Fundo $\epsilon_B$")
@@ -1229,6 +1232,446 @@ def generate_complete_plot_suite(
         plot_significance_ratio(
             scores, kappas=kappas, save_path=cmp_dir / "significance_ratio_scan.png", show=show
         )
+        plot_signal_eff_vs_bkg_rejection(
+            scores, kappas=kappas, save_path=cmp_dir / "signal_eff_vs_bkg_rejection.png", show=show
+        )
+        if "yields" in eval_res and "significance_ratio" in eval_res:
+            plot_physical_yields_and_significance(
+                eval_res["yields"],
+                eval_res["significance_ratio"],
+                save_path=cmp_dir / "physical_yields_and_significance_cmp.png",
+                show=show,
+            )
         saved_dirs["comparison"] = cmp_dir
 
     return saved_dirs
+
+
+# ==============================================================================
+# PLOTS DEDICADOS DOS ESTUDOS FÍSICOS E ESTATÍSTICOS COMPLEMENTARES:
+# - Eficiência de Sinal vs Rejeição de Fundo (1 / ε_B) + Razão de Rejeição
+# - Estudo de Overtraining (Histogramas Treino vs Val/Test + KS por classe)
+# - Estudo de Interpolação em κ_λ = 2.45 (held-out)
+# - Teste de Random Labels (loss vs ln(3) e AUC vs 0.5)
+# - Estabilidade entre Seeds (AUC_w e ganho ΔAUC_w ± 1σ)
+# - Comparação de Rendimentos Físicos Assinados (S/B, Asimov Z_A) e σ_ratio
+# ==============================================================================
+
+
+def plot_signal_eff_vs_bkg_rejection(
+    scores: dict[str, dict[float, dict[str, np.ndarray]]],
+    kappas: Sequence[float] = (0.0, 1.0, 2.45, 5.0),
+    ref_model: str = "AffinePNN",
+    base_model: str = "DNN_AN",
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> plt.Figure:
+    """Plota Fator de Rejeição de Fundo `1 / ε_B` (escala log) vs Eficiência de Sinal `ε_S`
+    e, no painel inferior, a razão de rejeição `(1/ε_B)_Affine / (1/ε_B)_AN`."""
+    has_ratio = ref_model in scores and base_model in scores
+    nrows = 2 if has_ratio else 1
+    height_ratios = [3.0, 1.15] if has_ratio else [1.0]
+    fig, axes = plt.subplots(
+        nrows,
+        len(kappas),
+        figsize=(4.5 * len(kappas), 6.2 if has_ratio else 4.4),
+        sharex=True,
+        gridspec_kw={"height_ratios": height_ratios},
+        squeeze=False,
+    )
+    eff_grid = np.linspace(0.20, 0.96, 160)
+
+    for j, k in enumerate(kappas):
+        fk = float(k)
+        ax_top = axes[0, j]
+        rej_by_model: dict[str, np.ndarray] = {}
+
+        for i, (m_name, sc) in enumerate(scores.items()):
+            d = sc[fk]
+            fpr, tpr = weighted_roc(d["y"], d["s"], d["w"])
+            tpr_m = np.maximum.accumulate(tpr)
+            eps_b = np.clip(np.interp(eff_grid, tpr_m, fpr), 1e-4, 1.0)
+            rej = 1.0 / eps_b
+            rej_by_model[m_name] = rej
+
+            rej_80 = float(np.interp(0.80, eff_grid, rej))
+            col = MODEL_COLORS.get(m_name, f"C{i}")
+            ls = MODEL_STYLES.get(m_name, "-")
+            ax_top.plot(
+                eff_grid,
+                rej,
+                color=col,
+                ls=ls,
+                lw=2.0,
+                label=f"{m_name} ($1/\\epsilon_B$@0.8={rej_80:.1f}x)",
+            )
+
+        ax_top.axvline(0.50, color="gray", ls=":", lw=0.9, alpha=0.6)
+        ax_top.axvline(0.80, color="gray", ls="--", lw=0.9, alpha=0.6)
+        ax_top.set_yscale("log")
+        ax_top.set_xlim(0.20, 0.96)
+        ax_top.set_title(rf"$\kappa_\lambda = {k:g}$", fontsize=12, fontweight="bold")
+        ax_top.grid(True, which="both", alpha=0.3)
+        ax_top.legend(loc="upper right", fontsize=8.0)
+        if j == 0:
+            ax_top.set_ylabel(r"Rejeição de Fundo $1 / \epsilon_B$ (log)")
+        if not has_ratio:
+            ax_top.set_xlabel(r"Eficiência de Sinal $\epsilon_S$")
+
+        if has_ratio:
+            ax_bot = axes[1, j]
+            ratio = rej_by_model[ref_model] / np.maximum(rej_by_model[base_model], 1e-9)
+            ax_bot.plot(eff_grid, ratio, color=MODEL_COLORS.get(ref_model, "#1f77b4"), lw=1.9)
+            ax_bot.axhline(1.0, color="black", ls="--", lw=1.0, alpha=0.75)
+            ax_bot.axvline(0.80, color="gray", ls="--", lw=0.9, alpha=0.6)
+            ax_bot.set_xlabel(r"Eficiência de Sinal $\epsilon_S$")
+            ax_bot.grid(True, alpha=0.3)
+            ylo = min(0.85, float(np.min(ratio)) * 0.95)
+            yhi = max(1.25, float(np.max(ratio)) * 1.08)
+            ax_bot.set_ylim(ylo, min(yhi, 4.0))
+            if j == 0:
+                ax_bot.set_ylabel(f"Razão {ref_model}/{base_model}")
+
+    fig.suptitle(
+        r"Eficiência de Sinal $\epsilon_S$ vs Rejeição de Fundo $1/\epsilon_B$ (pesos não-negativos)",
+        fontsize=13,
+        fontweight="bold",
+        y=1.01,
+    )
+    fig.tight_layout()
+    return _finalize_fig(fig, save_path=save_path, show=show)
+
+
+def plot_overtraining_distributions(
+    p_train: np.ndarray,
+    y_train: np.ndarray,
+    p_eval: np.ndarray,
+    y_eval: np.ndarray,
+    class_labels: dict[int, str],
+    model_name: str = "AffinePNN",
+    split_label: str = "val",
+    n_bins: int = 30,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> plt.Figure:
+    """Estudo clássico de Overtraining em Física de Altas Energias:
+    compara a densidade de probabilidade `P(classe c)` em Treino (marcadores c/ barras Poisson)
+    vs Validação/Teste (histograma preenchido) em escala logarítmica, anotando KS e p-value."""
+    from scipy.stats import ks_2samp
+
+    n_cls = len(class_labels)
+    fig, axes = plt.subplots(
+        2,
+        n_cls,
+        figsize=(4.8 * n_cls, 5.6),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3.2, 1.1]},
+        squeeze=False,
+    )
+    bins = np.linspace(0.0, 1.0, int(n_bins) + 1)
+    centers = 0.5 * (bins[:-1] + bins[1:])
+    bw = bins[1] - bins[0]
+    cls_cols = {0: "#1f77b4", 1: "#ff7f0e", 2: "#2ca02c"}
+
+    for j, (c, cls_name) in enumerate(class_labels.items()):
+        ax_top, ax_rat = axes[0, j], axes[1, j]
+        col = cls_cols.get(c, f"C{c}")
+
+        s_tr = np.asarray(p_train[y_train == c, c], dtype=np.float64)
+        s_ev = np.asarray(p_eval[y_eval == c, c], dtype=np.float64)
+        ks_stat, p_val = ks_2samp(s_tr, s_ev) if len(s_tr) > 0 and len(s_ev) > 0 else (np.nan, np.nan)
+
+        cnt_tr, _ = np.histogram(s_tr, bins=bins)
+        cnt_ev, _ = np.histogram(s_ev, bins=bins)
+        n_tr_tot = max(int(cnt_tr.sum()), 1)
+        n_ev_tot = max(int(cnt_ev.sum()), 1)
+
+        dens_tr = cnt_tr / (n_tr_tot * bw)
+        err_tr = np.sqrt(np.maximum(cnt_tr, 1.0)) / (n_tr_tot * bw)
+        dens_ev = cnt_ev / (n_ev_tot * bw)
+        err_ev = np.sqrt(np.maximum(cnt_ev, 1.0)) / (n_ev_tot * bw)
+
+        ax_top.hist(
+            s_ev,
+            bins=bins,
+            density=True,
+            color=col,
+            alpha=0.28,
+            histtype="stepfilled",
+            label=f"{split_label} (N={len(s_ev):,d})",
+        )
+        ax_top.step(bins[:-1], np.maximum(dens_ev, 1e-5), where="post", color=col, lw=1.8)
+        pos_tr = cnt_tr > 0
+        ax_top.errorbar(
+            centers[pos_tr],
+            dens_tr[pos_tr],
+            yerr=err_tr[pos_tr],
+            fmt="o",
+            ms=4.2,
+            color="black",
+            ecolor="black",
+            elinewidth=1.0,
+            capsize=2,
+            label=f"treino (N={len(s_tr):,d})",
+        )
+        ax_top.set_yscale("log")
+        ax_top.set_title(
+            f"{cls_name} — KS = {ks_stat:.4f} ($p$ = {p_val:.2e})",
+            fontsize=10.5,
+            fontweight="bold",
+        )
+        ax_top.legend(loc="upper center", fontsize=8.2)
+        ax_top.grid(True, which="both", alpha=0.3)
+        if j == 0:
+            ax_top.set_ylabel("Densidade Normalizada (log)")
+
+        both = (cnt_tr > 0) & (cnt_ev > 0)
+        ratio = np.divide(dens_tr, dens_ev, out=np.ones_like(dens_tr), where=both)
+        ratio_err = ratio * np.sqrt(1.0 / np.maximum(cnt_tr, 1.0) + 1.0 / np.maximum(cnt_ev, 1.0))
+        ax_rat.axhline(1.0, color="gray", ls="--", lw=1.0)
+        if np.any(both):
+            ax_rat.errorbar(
+                centers[both],
+                ratio[both],
+                yerr=ratio_err[both],
+                fmt="o",
+                ms=3.8,
+                color=col,
+                ecolor=col,
+                elinewidth=1.0,
+            )
+        ax_rat.set_ylim(0.5, 1.5)
+        ax_rat.set_xlim(0.0, 1.0)
+        ax_rat.set_xlabel(f"Score $P(\\mathrm{{{cls_name}}})$")
+        ax_rat.grid(True, alpha=0.3)
+        if j == 0:
+            ax_rat.set_ylabel(f"Treino / {split_label}")
+
+    fig.suptitle(
+        f"Estudo de Overtraining (Treino vs {split_label}) — {model_name}",
+        fontsize=13,
+        fontweight="bold",
+        y=1.02,
+    )
+    fig.tight_layout()
+    return _finalize_fig(fig, save_path=save_path, show=show)
+
+
+def plot_interpolation_study(
+    interp_data: pd.Series | pd.DataFrame,
+    held_out: float = 2.45,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> plt.Figure:
+    """Visualiza o Estudo de Interpolação em `held_out` (ex.: κ_λ = 2.45 omitido do treino)."""
+    if isinstance(interp_data, pd.DataFrame):
+        if interp_data.shape[1] >= 2:
+            ser = pd.Series(interp_data.iloc[:, 1].to_numpy(np.float64), index=interp_data.iloc[:, 0].astype(str))
+        else:
+            ser = interp_data.iloc[:, 0].astype(float)
+    else:
+        ser = interp_data.astype(float)
+
+    labels = list(ser.index)
+    vals = ser.to_numpy(np.float64)
+    colors = []
+    for lbl in labels:
+        low = lbl.lower()
+        if "completo" in low or "referencia" in low:
+            colors.append("#1f77b4")
+        elif "correto" in low and "affine" in low:
+            colors.append("#2ca02c")
+        elif "correto" in low and "concat" in low:
+            colors.append("#9467bd")
+        elif "dnn_an" in low or "baseline" in low:
+            colors.append("#ff7f0e")
+        else:
+            colors.append("#d62728")
+
+    fig, ax = plt.subplots(figsize=(9.5, 0.65 * max(len(labels), 4) + 1.6))
+    y = np.arange(len(labels))
+    bars = ax.barh(y, vals, color=colors, alpha=0.88, height=0.62)
+    for b in bars:
+        w_val = b.get_width()
+        ax.text(w_val + 0.002, b.get_y() + b.get_height() / 2.0, f"{w_val:.4f}", va="center", fontsize=9, fontweight="bold")
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.invert_yaxis()
+    xmin = max(0.45, float(np.min(vals)) - 0.04)
+    xmax = min(1.02, float(np.max(vals)) + 0.035)
+    ax.set_xlim(xmin, xmax)
+    ax.set_xlabel(rf"AUC$_w$ avaliada na amostra omitida $\kappa_\lambda = {held_out:g}$")
+    ax.set_title(rf"Estudo de Interpolação em $\kappa_\lambda = {held_out:g}$ (Ponto Held-Out)", fontweight="bold")
+    ax.grid(True, axis="x", alpha=0.3)
+    fig.tight_layout()
+    return _finalize_fig(fig, save_path=save_path, show=show)
+
+
+def plot_random_label_test(
+    rl_df: pd.DataFrame,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> plt.Figure:
+    """Visualiza o Teste de Random Labels (13.4): loss final vs ln(3) e AUC vs 0.5 por seed."""
+    fig, ax = plt.subplots(1, 2, figsize=(11.2, 4.2))
+    seeds = [f"Seed {int(s)}" for s in rl_df["seed"]]
+    x = np.arange(len(seeds))
+    chance = float(rl_df["ln_n_classes"].iloc[0]) if "ln_n_classes" in rl_df.columns else float(np.log(3.0))
+
+    b0 = ax[0].bar(x, rl_df["loss_treino_final"], width=0.5, color="#1f77b4", alpha=0.85, label="Loss final (labels aleatórios)")
+    ax[0].axhline(chance, color="#d62728", ls="--", lw=1.8, label=f"$\\ln(3) = {chance:.4f}$ (acaso puro)")
+    for b in b0:
+        ax[0].text(b.get_x() + b.get_width() / 2.0, b.get_height() + 0.008, f"{b.get_height():.4f}", ha="center", fontsize=8.5)
+    ax[0].set_xticks(x)
+    ax[0].set_xticklabels(seeds)
+    ax[0].set_ylim(0.0, max(chance * 1.22, float(rl_df["loss_treino_final"].max()) * 1.15))
+    ax[0].set_ylabel("Cross-Entropy de Treino")
+    ax[0].set_title("Teste de Random Labels — Loss vs $\\ln(3)$", fontweight="bold")
+    ax[0].legend(fontsize=8.5)
+    ax[0].grid(axis="y", alpha=0.3)
+
+    b1 = ax[1].bar(x, rl_df["AUC_vs_label_real"], width=0.5, color="#2ca02c", alpha=0.85, label="AUC vs label real")
+    ax[1].axhline(0.5, color="#d62728", ls="--", lw=1.8, label="AUC = 0.5000 (sem vazamento)")
+    for b in b1:
+        ax[1].text(b.get_x() + b.get_width() / 2.0, b.get_height() + 0.008, f"{b.get_height():.4f}", ha="center", fontsize=8.5)
+    ax[1].set_xticks(x)
+    ax[1].set_xticklabels(seeds)
+    ax[1].set_ylim(0.0, 0.72)
+    ax[1].set_ylabel("AUC ROC (Validação)")
+    ax[1].set_title("Teste de Random Labels — AUC vs Label Verdadeiro", fontweight="bold")
+    ax[1].legend(fontsize=8.5)
+    ax[1].grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    return _finalize_fig(fig, save_path=save_path, show=show)
+
+
+def plot_seed_stability(
+    seeds_df: pd.DataFrame,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> plt.Figure:
+    """Visualiza a estabilidade entre seeds (13.6): média ± 1σ de AUC_w por modelo e ganho ΔAUC_w por κ_λ."""
+    fig, ax = plt.subplots(1, 2, figsize=(12.4, 4.4))
+    agg = seeds_df.groupby(["modelo", "kappa"])["auc_w"].agg(["mean", "std"]).reset_index()
+    agg["std"] = agg["std"].fillna(0.0)
+
+    for i, m_name in enumerate(agg["modelo"].unique()):
+        sub = agg[agg["modelo"] == m_name].sort_values("kappa")
+        col = MODEL_COLORS.get(m_name, f"C{i}")
+        ls = MODEL_STYLES.get(m_name, "-")
+        ax[0].errorbar(
+            sub["kappa"],
+            sub["mean"],
+            yerr=sub["std"],
+            fmt="o",
+            ls=ls,
+            lw=2.0,
+            capsize=4,
+            color=col,
+            label=f"{m_name} ($\\mu \\pm 1\\sigma$)",
+        )
+    ax[0].set_xlabel(r"Hipótese $\kappa_\lambda$")
+    ax[0].set_ylabel(r"AUC$_w$ (média $\pm 1\sigma$ entre seeds)")
+    ax[0].set_title("Estabilidade de AUC$_w$ entre Seeds", fontweight="bold")
+    ax[0].grid(alpha=0.3)
+    ax[0].legend(fontsize=9)
+
+    piv = seeds_df.pivot_table(index=["kappa", "seed"], columns="modelo", values="auc_w")
+    if {"AffinePNN", "DNN_AN"}.issubset(piv.columns):
+        diff = (piv["AffinePNN"] - piv["DNN_AN"]).groupby("kappa").agg(["mean", "std"]).reset_index()
+        diff["std"] = diff["std"].fillna(0.0)
+        x = np.arange(len(diff))
+        ax[1].bar(
+            x,
+            diff["mean"],
+            yerr=diff["std"],
+            capsize=5,
+            width=0.52,
+            color="#1f77b4",
+            alpha=0.88,
+            label=r"$\Delta \mathrm{AUC}_w$ (AffinePNN $-$ DNN_AN)",
+        )
+        ax[1].axhline(0.0, color="black", ls="--", lw=1.0)
+        ax[1].set_xticks(x)
+        ax[1].set_xticklabels([rf"$\kappa_\lambda={k:g}$" for k in diff["kappa"]])
+        ax[1].set_ylabel(r"Ganho $\Delta \mathrm{AUC}_w$ ($\mu \pm 1\sigma$)")
+        ax[1].set_title("Ganho Consistente entre Inicializações (Seeds)", fontweight="bold")
+        ax[1].legend(fontsize=9)
+        ax[1].grid(axis="y", alpha=0.3)
+    else:
+        ax[1].text(0.5, 0.5, "Requer AffinePNN e DNN_AN para ΔAUC", ha="center", va="center")
+
+    fig.tight_layout()
+    return _finalize_fig(fig, save_path=save_path, show=show)
+
+
+def plot_physical_yields_and_significance(
+    yields_tables: dict[str, pd.DataFrame],
+    sig_ratio_tables: dict[str, pd.DataFrame] | None = None,
+    eff_target: float = 0.8,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> plt.Figure:
+    """Compara os rendimentos físicos esperados COM PESOS ASSINADOS DE NLO (`S/B` e significância de Asimov `Z_A`
+    em `eff_sinal = eff_target`) lado a lado com o `Significance Ratio` (Anzalone Eq. 4)."""
+    model_names = list(yields_tables.keys())
+    sample_df = yields_tables[model_names[0]]
+    avail_effs = sample_df["eff_sinal"].unique()
+    chosen_eff = float(avail_effs[int(np.argmin(np.abs(avail_effs - float(eff_target))))])
+    kappas = sorted(sample_df["kappa"].unique())
+
+    ncols = 3 if sig_ratio_tables else 2
+    fig, axes = plt.subplots(1, ncols, figsize=(4.8 * ncols, 4.4), squeeze=False)
+    x = np.arange(len(kappas))
+    w_bar = 0.72 / max(len(model_names), 1)
+
+    panels = [
+        ("S/B", rf"Razão Física $S / B$ ($\epsilon_S = {chosen_eff:g}$, $w_{{\mathrm{{NLO}}}}$ assinado)"),
+        ("Z_asimov", rf"Significância de Asimov $Z_A$ ($\epsilon_S = {chosen_eff:g}$, $w_{{\mathrm{{NLO}}}}$ assinado)"),
+    ]
+    for p_idx, (col_key, title) in enumerate(panels):
+        ax = axes[0, p_idx]
+        for i, m_name in enumerate(model_names):
+            df_m = yields_tables[m_name]
+            sub = df_m[np.isclose(df_m["eff_sinal"], chosen_eff)].sort_values("kappa")
+            vals = np.nan_to_num(sub[col_key].to_numpy(np.float64), nan=0.0)
+            offs = (i - (len(model_names) - 1) / 2.0) * w_bar
+            col = MODEL_COLORS.get(m_name, f"C{i}")
+            ax.bar(x + offs, vals, w_bar, color=col, alpha=0.88, label=m_name)
+        ax.set_xticks(x)
+        ax.set_xticklabels([rf"$\kappa_\lambda={k:g}$" for k in kappas])
+        ax.set_title(title, fontsize=10.2, fontweight="bold")
+        ax.grid(axis="y", alpha=0.3)
+        ax.legend(fontsize=8.5)
+
+    if sig_ratio_tables:
+        ax_sr = axes[0, 2]
+        for i, m_name in enumerate(model_names):
+            if m_name not in sig_ratio_tables:
+                continue
+            sub_sr = sig_ratio_tables[m_name].sort_values("kappa")
+            sr_col = "sigma_ratio" if "sigma_ratio" in sub_sr.columns else "best_sigma_ratio"
+            vals_sr = sub_sr[sr_col].to_numpy(np.float64)
+            offs = (i - (len(model_names) - 1) / 2.0) * w_bar
+            col = MODEL_COLORS.get(m_name, f"C{i}")
+            bars = ax_sr.bar(x + offs, vals_sr, w_bar, color=col, alpha=0.88, label=m_name)
+            for b in bars:
+                ax_sr.text(
+                    b.get_x() + b.get_width() / 2.0,
+                    b.get_height() + 0.003,
+                    f"{b.get_height():.4f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=7.5,
+                )
+        ax_sr.set_xticks(x)
+        ax_sr.set_xticklabels([rf"$\kappa_\lambda={k:g}$" for k in kappas])
+        ax_sr.set_ylim(0.65, 1.03)
+        ax_sr.set_title(r"Significance Ratio Ótimo ($\sigma_{\mathrm{ratio}}^*$)", fontsize=10.2, fontweight="bold")
+        ax_sr.grid(axis="y", alpha=0.3)
+        ax_sr.legend(fontsize=8.5)
+
+    fig.tight_layout()
+    return _finalize_fig(fig, save_path=save_path, show=show)

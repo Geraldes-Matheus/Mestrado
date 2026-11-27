@@ -40,6 +40,7 @@ def build_model(
     l2_weight: float = 0.0,
     l2_bias: float = 0.0,
     l2_conditioning: float = 0.0,
+    mask_bjet1_without_pair: bool = False,
 ) -> keras.Model:
     """Constrói o modelo classificador multiclasse {DY, ttbar, HH}:
     - `kind="affine"`: AffinePNN (Dense -> BN -> ELU -> AffineConditioning(κ_λ))
@@ -62,13 +63,20 @@ def build_model(
 
     if backbone == "an_densenet":
         lbn_idx, other_idx = get_lbn_column_indices(continuous_features, lbn_particles)
+        bjet1_slot = lbn_particles.index("bjet1") if "bjet1" in lbn_particles else None
+        bjet2_slot = lbn_particles.index("bjet2") if "bjet2" in lbn_particles else None
+        fatjet_slot = lbn_particles.index("fatjet") if "fatjet" in lbn_particles else None
         vecs = FourVectorsFromFeatures(
             lbn_idx,
             feature_mean[lbn_idx],
             feature_std[lbn_idx],
             lbn_n,
+            bjet1_slot=bjet1_slot,
+            bjet2_slot=bjet2_slot,
+            fatjet_slot=fatjet_slot,
+            mask_bjet1_without_pair=mask_bjet1_without_pair,
             name="four_vectors",
-        )([x_cont_in, cat_by_name["has_fatjet"]])
+        )([x_cont_in, cat_by_name["has_jet_pair"], cat_by_name["has_fatjet"]])
         lbn = keras.layers.Flatten(name="lbn_flat")(
             LorentzBoostNetwork(lbn_n, lbn_m, name="lbn")(vecs)
         )
@@ -190,6 +198,7 @@ def build_model_from_config(
         l2_weight=mcfg.get("l2_weight", 0.0),
         l2_bias=mcfg.get("l2_bias", 0.0),
         l2_conditioning=mcfg.get("l2_conditioning", 0.0),
+        mask_bjet1_without_pair=bool(fcfg.get("mask_bjet1_always_on_no_pair", False)),
     )
 
 

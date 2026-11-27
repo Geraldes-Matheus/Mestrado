@@ -32,7 +32,9 @@ Definidas em [`configs/features.yaml`](../configs/features.yaml) em conformidade
 
 1. `normalization_weight` já incorpora $\sigma \times \mathcal{L}_{\text{era}} \times \text{SFs} / \sum w_{\text{gen}}$ da amostra completa. Quando `max_events_per_file` limita a leitura de arquivos gigantes de fundo, o código aplica automaticamente o fator de reescala por arquivo:
    $$w_{\text{phys}} = \text{normalization\_weight} \times \frac{N_{\text{total}}}{N_{\text{lidos}}}$$
-2. Os sinais negativos provenientes da geração MC em NLO (especialmente ~32% no Drell-Yan aMC@NLO) são físicos e **preservados** no cálculo das quotas líquidas por subprocesso, nas curvas ROC ponderadas e nos rendimentos esperados.
+2. **Separação estrita entre Classificação e Rendimentos Físicos para Pesos Negativos de NLO:**
+   - Os sinais negativos provenientes da geração MC em NLO (especialmente ~32% no Drell-Yan aMC@NLO) são físicos e **preservados integralmente** no cálculo das **quotas líquidas por subprocesso** (`soma_signed`, AN-25-103 Seção 5.3.5) e nos **rendimentos físicos esperados e significância de Asimov** ($N_{\text{esperado}} = \sum_i w_{\text{phys}, i}$, $S/B$, $S/\sqrt{B}$, $Z_A$).
+   - Já na **avaliação convencional de classificação** (`ROC`, `AUC_w`, `PR-AUC`, `Precision/Recall/F1`, otimização de *thresholds* e *bootstrap*), pesos negativos quebrariam a monotonicidade de TPR/FPR. Por isso, essas métricas utilizam explicitamente pesos não-negativos $w_{\text{clf}} = \max(w_{\text{phys}}, 0)$ (verificando soma positiva em cada classe) acompanhados sempre da `AUC` sem pesos.
 
 ## Dados Sintéticos para Testes Locais
 

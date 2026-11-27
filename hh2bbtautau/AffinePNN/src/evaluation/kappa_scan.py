@@ -13,6 +13,7 @@ from src.data.sampler import QuotaBatchGenerator
 from src.data.weights import oversampling_frequency_weights
 from src.evaluation.roc import (
     auc_from_roc,
+    auc_unweighted,
     auc_w,
     binary_metrics_at_threshold,
     compute_curves_for_kappa,
@@ -43,7 +44,7 @@ def summarize_scores(
 
         row: dict[str, float] = {
             "kappa": float(k),
-            "auc": auc_w(y, s, np.ones_like(s)),
+            "auc": auc_unweighted(y, s),
             "auc_w": auc_from_roc(fpr, tpr),
             "pr_auc": float(curves["pr_auc"]),
             "sigma_ratio": float(sig_res["best_sigma_ratio"]),
@@ -86,6 +87,7 @@ def compare_models_table(
     """Compara diretamente duas tabelas de `summarize_scores` (ex: AffinePNN vs DNN_AN)."""
     cols = [
         "kappa",
+        "auc",
         "auc_w",
         "auc_w_err",
         "pr_auc",
@@ -101,6 +103,8 @@ def compare_models_table(
         if c.startswith("eps_b@") and c in table_ref.columns:
             cols.append(c)
     cmp = table_a[cols].merge(table_ref[cols], on="kappa", suffixes=(suffix_a, suffix_ref))
+    if f"auc{suffix_a}" in cmp.columns:
+        cmp[f"ganho_auc({suffix_a[1:]}-{suffix_ref[1:]})"] = cmp[f"auc{suffix_a}"] - cmp[f"auc{suffix_ref}"]
     cmp[f"ganho_auc_w({suffix_a[1:]}-{suffix_ref[1:]})"] = cmp[f"auc_w{suffix_a}"] - cmp[f"auc_w{suffix_ref}"]
     if f"f1_w_bal{suffix_a}" in cmp.columns:
         cmp[f"ganho_f1({suffix_a[1:]}-{suffix_ref[1:]})"] = cmp[f"f1_w_bal{suffix_a}"] - cmp[f"f1_w_bal{suffix_ref}"]
@@ -249,6 +253,7 @@ def interpolation_study(
     data: PreparedData,
     val_freq_w: np.ndarray,
     model_full_ref: keras.Model | None = None,
+    model_dnn_ref: keras.Model | None = None,
     held_out: float = 2.45,
     epochs: int | None = None,
     steps_per_epoch: int | None = None,
@@ -325,6 +330,8 @@ def interpolation_study(
     results: dict[str, float] = {}
     if model_full_ref is not None:
         results[f"referencia: AffinePNN completo (viu κ={held_out:g})"] = _auc_at(model_full_ref)
+    if model_dnn_ref is not None:
+        results[f"baseline: DNN_AN (Single-NN sem κ_λ)"] = _auc_at(model_dnn_ref)
     results["affine sem κ held-out, κ de entrada CORRETO"] = _auc_at(trained_models["affine"])
     results["concat sem κ held-out, κ de entrada CORRETO"] = _auc_at(trained_models["pnn_concat"])
     for k_wrong in reduced:

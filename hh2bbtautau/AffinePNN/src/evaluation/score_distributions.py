@@ -63,7 +63,8 @@ def overtraining_ks(
     batch_size: int = 8192,
     seed: int = 42,
     verbose: bool = True,
-) -> pd.DataFrame:
+    return_scores: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, np.ndarray]]:
     """Teste de Kolmogorov-Smirnov (KS) comparando scores de treino vs validação/teste em modo eval."""
     rng = np.random.default_rng(seed)
     n_sub = min(int(n_samples), len(train_df))
@@ -90,7 +91,10 @@ def overtraining_ks(
         rows.append({"classe": name, "ks_stat": float(stat), "p_value": float(pval), "status": status})
         if verbose:
             print(f"  {name:6s}: KS = {stat:.4f}  (p = {pval:.2e})  {'OK' if stat < 0.03 else 'ATENÇÃO: olhar'}")
-    return pd.DataFrame(rows)
+    ks_df = pd.DataFrame(rows)
+    if return_scores:
+        return ks_df, {"p_train": p_tr, "y_train": y_tr, "p_eval": p_ev, "y_eval": np.asarray(ev_y)}
+    return ks_df
 
 
 def reconstruct_invariant_masses(df: pd.DataFrame) -> pd.DataFrame:

@@ -210,14 +210,20 @@ def export_end2end_raw_onnx(
     std_np = np.asarray(scaler.std, dtype=np.float32).reshape(1, -1)
     cov_mask_np = np.array([[c in cov_cols for c in cont_cols]], dtype=bool)
 
-    # Mapeamento (flag_cat_idx, mask_bool_cont[1, 49]) para bjet2 e fatjet ausentes
+    # Mapeamento (flag_cat_idx, mask_bool_cont[1, 49]) para objetos opcionais ausentes (bjet2/hbb/htthbb e fatjet/httfatjet)
     missing_rules: list[tuple[int, np.ndarray]] = []
-    for flag_col, prefix in missing_masks.items():
+    for flag_col, prefixes_cfg in missing_masks.items():
         if flag_col in cat_cols:
             cat_idx = cat_cols.index(flag_col)
-            affected = np.array([[c.startswith(prefix) for c in cont_cols]], dtype=bool)
+            prefixes = [prefixes_cfg] if isinstance(prefixes_cfg, str) else list(prefixes_cfg)
+            affected = np.array([[any(c.startswith(pfx) for pfx in prefixes) for c in cont_cols]], dtype=bool)
             if affected.any():
                 missing_rules.append((cat_idx, affected))
+
+    mask_bjet1_always = bool(fcfg.get("mask_bjet1_always_on_no_pair", False))
+    bjet1_affected_np = np.array([[c.startswith("reg_dnn_moe_bjet1_") for c in cont_cols]], dtype=bool)
+    bjet1_e_idx = cont_cols.index("reg_dnn_moe_bjet1_e") if "reg_dnn_moe_bjet1_e" in cont_cols else None
+    has_pair_cat_idx = cat_cols.index("reg_dnn_moe_has_jet_pair") if "reg_dnn_moe_has_jet_pair" in cat_cols else None
 
     # Tabelas constantes de codificação para cada uma das 7 features categóricas
     cat_tables: list[tuple[list[int], list[int], int]] = []
@@ -249,6 +255,20 @@ def export_end2end_raw_onnx(
             affected_tf = tf.constant(affected_np, dtype=tf.bool)
             mask_drop = tf.logical_and(flag_zero, affected_tf)
             is_valid = tf.logical_and(is_valid, tf.logical_not(mask_drop))
+
+        if has_pair_cat_idx is not None and bjet1_affected_np.any():
+            no_pair_tf = tf.equal(raw_categorical[:, has_pair_cat_idx : has_pair_cat_idx + 1], 0)
+            if mask_bjet1_always:
+                b1_drop = tf.logical_and(no_pair_tf, tf.constant(bjet1_affected_np, dtype=tf.bool))
+                is_valid = tf.logical_and(is_valid, tf.logical_not(b1_drop))
+            elif bjet1_e_idx is not None:
+                b1_e_raw = raw_continuous[:, bjet1_e_idx : bjet1_e_idx + 1]
+                b1_zero_tf = tf.logical_or(tf.logical_not(tf.math.is_finite(b1_e_raw)), b1_e_raw <= 0.0)
+                b1_drop = tf.logical_and(
+                    tf.logical_and(no_pair_tf, b1_zero_tf),
+                    tf.constant(bjet1_affected_np, dtype=tf.bool),
+                )
+                is_valid = tf.logical_and(is_valid, tf.logical_not(b1_drop))
 
         x_safe = tf.where(is_valid, raw_continuous, tf.zeros_like(raw_continuous))
         abs_x = tf.math.abs(x_safe)
@@ -357,13 +377,23 @@ def verify_onnx_parity(
         continuous_features=cont_cols,
         cov_cols=cfg["features"].get("cov_cols", []),
         missing_masks=cfg["features"].get("missing_object_masks", {}),
+        mask_bjet1_always_on_no_pair=bool(cfg["features"].get("mask_bjet1_always_on_no_pair", False)),
     )
     x_cont_py = scaler.transform(df_prep)
     x_cat_py = cat_preprocessor.transform(df_prep)
     keras_inputs = make_inputs(x_cont_py, x_cat_py, raw_kappa.ravel(), kappa_norm=knorm)
-    probs_keras = model.predict(keras_inputs, batch_size=256, verbose=0).astype(np.float32)
 
-    # Caminho 2: ONNX pré-processado
+    # Avalia a referência Keras em CPU IEEE-754 FP32 (evitando truncamento TF32 de 10 bits das GPUs Ampere/A100!)
+    ordered_tensors = [tf.constant(keras_inputs["x_continuous"], dtype=tf.float32)]
+    for c in cat_cols:
+        ordered_tensors.append(tf.constant(keras_inputs[f"cat_{short_cat_name(c)}"], dtype=tf.int32))
+    ordered_tensors.append(tf.constant(keras_inputs["kappa_lambda"], dtype=tf.float32))
+    with tf.device("/CPU:0"):
+        probs_keras = keras.ops.convert_to_numpy(model(ordered_tensors, training=False)).astype(np.float32)
+
+    probs_default_dev = model.predict(keras_inputs, batch_size=256, verbose=0).astype(np.float32)
+
+    # Caminho 2: ONNX pré-processado (CPU FP32)
     sess_pre = ort.InferenceSession(str(preprocessed_onnx_path), providers=["CPUExecutionProvider"])
     ort_pre_inputs = {"x_continuous": keras_inputs["x_continuous"], "kappa_lambda": keras_inputs["kappa_lambda"]}
     for c in cat_cols:
@@ -371,7 +401,7 @@ def verify_onnx_parity(
         ort_pre_inputs[f"cat_{sc}"] = keras_inputs[f"cat_{sc}"]
     probs_onnx_pre = sess_pre.run(["class_probs"], ort_pre_inputs)[0]
 
-    # Caminho 3: ONNX End-to-End (direto nos arrays brutos com sentinela!)
+    # Caminho 3: ONNX End-to-End (direto nos arrays brutos com sentinela e objetos ausentes!)
     sess_e2e = ort.InferenceSession(str(end2end_onnx_path), providers=["CPUExecutionProvider"])
     probs_onnx_e2e = sess_e2e.run(
         ["class_probs"],
@@ -384,22 +414,28 @@ def verify_onnx_parity(
 
     diff_pre = np.abs(probs_keras - probs_onnx_pre)
     diff_e2e = np.abs(probs_keras - probs_onnx_e2e)
+    diff_onnx_pair = np.abs(probs_onnx_pre - probs_onnx_e2e)
+    diff_gpu_tf32 = np.abs(probs_default_dev - probs_onnx_e2e)
+
     max_diff_pre = float(diff_pre.max())
     max_diff_e2e = float(diff_e2e.max())
+    max_diff_pair = float(diff_onnx_pair.max())
 
     if max_diff_pre > atol or max_diff_e2e > atol:
         raise AssertionError(
-            f"Divergência numérica acima da tolerância ({atol}) na exportação ONNX! "
+            f"Divergência numérica FP32 acima da tolerância ({atol}) na exportação ONNX! "
             f"max_diff_preprocessed={max_diff_pre:.3e}, max_diff_end2end={max_diff_e2e:.3e}"
         )
 
     return {
         "n_test_samples": int(n_test_samples),
-        "tolerance": float(atol),
+        "tolerance_fp32": float(atol),
         "preprocessed_onnx_max_abs_diff": max_diff_pre,
         "preprocessed_onnx_mean_abs_diff": float(diff_pre.mean()),
         "end2end_raw_onnx_max_abs_diff": max_diff_e2e,
         "end2end_raw_onnx_mean_abs_diff": float(diff_e2e.mean()),
+        "onnx_pre_vs_end2end_max_abs_diff": max_diff_pair,
+        "default_device_vs_onnx_fp32_max_abs_diff": float(diff_gpu_tf32.max()),
         "status": "PASSED",
     }
 

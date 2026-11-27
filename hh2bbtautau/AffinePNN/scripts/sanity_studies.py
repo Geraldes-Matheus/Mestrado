@@ -25,6 +25,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.data.preprocessing import make_inputs, prepare_datasets_from_config
 from src.data.weights import oversampling_frequency_weights
 from src.evaluation.kappa_scan import interpolation_study, seed_study
+from src.evaluation.plotting import (
+    plot_interpolation_study,
+    plot_random_label_test,
+    plot_seed_stability,
+)
 from src.training.diagnostics import random_label_test
 from src.training.train import create_generator_for_model, load_model_bundle
 from src.utils.config import apply_overrides, load_config
@@ -94,6 +99,7 @@ def main() -> None:
             verbose=True,
         )
         rl_df.to_csv(out_paths.metrics / "sanity_random_label_test.csv", index=False)
+        plot_random_label_test(rl_df, save_path=out_paths.plots / "sanity_random_label_test.png", show=False)
 
     elif args.study == "interpolation":
         gen_ref = create_generator_for_model(cfg, "affine", data)
@@ -104,8 +110,13 @@ def main() -> None:
             clip=cfg["sampling"]["val_freq_clip"],
         )
         model_full = None
+        model_dnn = None
         try:
             model_full, _, _ = load_model_bundle(out_paths.checkpoints, "AffinePNN")
+        except FileNotFoundError:
+            pass
+        try:
+            model_dnn, _, _ = load_model_bundle(out_paths.checkpoints, "DNN_AN")
         except FileNotFoundError:
             pass
         ser = interpolation_study(
@@ -113,12 +124,17 @@ def main() -> None:
             data=data,
             val_freq_w=val_freq_w,
             model_full_ref=model_full,
+            model_dnn_ref=model_dnn,
             held_out=args.held_out,
             epochs=args.epochs,
             steps_per_epoch=args.steps_per_epoch,
             verbose=True,
         )
-        ser.to_frame().to_csv(out_paths.metrics / f"sanity_interpolation_kl{str(args.held_out).replace('.', 'p')}.csv")
+        tag = str(args.held_out).replace(".", "p")
+        ser.to_frame().to_csv(out_paths.metrics / f"sanity_interpolation_kl{tag}.csv")
+        plot_interpolation_study(
+            ser, held_out=args.held_out, save_path=out_paths.plots / f"sanity_interpolation_kl{tag}.png", show=False
+        )
 
     elif args.study == "seeds":
         seeds = args.seeds or cfg["studies"]["seeds_for_study"]
@@ -133,6 +149,9 @@ def main() -> None:
         seed_tag = "_".join(str(s) for s in seeds)
         seeds_df.to_csv(out_paths.metrics / f"sanity_seeds_metrics_{seed_tag}.csv", index=False)
         gain_df.to_csv(out_paths.metrics / f"sanity_seeds_gain_{seed_tag}.csv", index=False)
+        plot_seed_stability(
+            seeds_df, save_path=out_paths.plots / f"sanity_seeds_stability_{seed_tag}.png", show=False
+        )
 
 
 if __name__ == "__main__":

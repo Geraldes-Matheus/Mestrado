@@ -23,11 +23,24 @@ cov_cols:
   - "reg_dnn_moe_met_cov01"
   - "reg_dnn_moe_met_cov11"
 
-# Objetos opcionais: quando a flag categórica == 0, as contínuas correspondentes
-# são marcadas como NaN antes de estimar média/desvio no treino
+# Objetos opcionais (AN-25-103 Seção 5.2.2 / Tabela 29):
+# Quando a flag categórica == 0, as features contínuas dos objetos ausentes
+# são marcadas como NaN antes de estimar média/desvio no treino (virando 0 após padronizar,
+# e sendo explicitamente zeradas nos 4-vetores físicos da camada FourVectorsFromFeatures do LBN).
 missing_object_masks:
-  reg_dnn_moe_has_jet_pair: "reg_dnn_moe_bjet2_"
-  reg_dnn_moe_has_fatjet: "reg_dnn_moe_fatjet_"
+  reg_dnn_moe_has_jet_pair:
+    - "reg_dnn_moe_bjet2_"
+    - "reg_dnn_moe_hbb_"
+    - "reg_dnn_moe_htthbb_"
+  reg_dnn_moe_has_fatjet:
+    - "reg_dnn_moe_fatjet_"
+    - "reg_dnn_moe_httfatjet_"
+
+# Convenção para bjet1 quando has_jet_pair == 0:
+# - false (padrão seguro): preserva bjet1 caso exista 1 jato AK4 isolado (E > 0), mas zera o 4-vetor
+#   no LBN automaticamente se bjet1 vier zerado (E <= 0) nos Parquets (convenção da AN Seção 5.2.2).
+# - true: força zeragem incondicional de bjet1 sempre que has_jet_pair == 0.
+mask_bjet1_always_on_no_pair: false
 
 # Partículas cujos 4-vetores (e, px, py, pz) alimentam a Lorentz Boost Network (LBN)
 lbn_particles:
