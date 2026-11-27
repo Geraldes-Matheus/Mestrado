@@ -80,6 +80,14 @@ def stratified_split(
     return splits
 
 
+BJET1_P4_COLS: tuple[str, ...] = (
+    "reg_dnn_moe_bjet1_e",
+    "reg_dnn_moe_bjet1_px",
+    "reg_dnn_moe_bjet1_py",
+    "reg_dnn_moe_bjet1_pz",
+)
+
+
 def apply_physical_preprocessing(
     df: pd.DataFrame,
     continuous_features: list[str],
@@ -88,10 +96,15 @@ def apply_physical_preprocessing(
     mask_bjet1_always_on_no_pair: bool = False,
 ) -> pd.DataFrame:
     """Pré-processamento físico idempotente (Seção 5 / AN-25-103 Seção 5.2.2):
-    1. Objetos ausentes preenchidos com 0 nos parquets (`has_jet_pair==0`, `has_fatjet==0`) viram NaN;
-       Para `bjet1`, se `has_jet_pair==0` e `bjet1_e <= 0` (ou `mask_bjet1_always_on_no_pair=True`),
-       também converte `bjet1_*` para NaN; caso haja 1 jato AK4 real (`bjet1_e > 0`), preserva-o.
-    2. Covariâncias da MET recebem compressão `sign(x) * log1p(|x|)`.
+    1. Objetos opcionais ausentes (`has_jet_pair==0` -> `bjet2/hbb/htthbb`, `has_fatjet==0` -> `fatjet/httfatjet`)
+       viram NaN (para receberem z=0 após padronização, enquanto a LBN os zera via flags categóricas).
+    2. Para `bjet1`:
+       - Evento 1-jet (`has_jet_pair==0` e `bjet1_e > 0`, com `mask_bjet1_always_on_no_pair=False`): preserva `bjet1`.
+       - Evento 0-jet (`has_jet_pair==0` e `bjet1_e <= 0` ou NaN) ou `mask_bjet1_always_on_no_pair=True`:
+         MANTÉM os 4 componentes físicos `bjet1_(e,px,py,pz) = 0.0` ANTES da padronização z-score
+         (para que `FourVectorsFromFeatures` reconstrua `(0,0,0,0)` físico em vez da média `μ`!),
+         e converte apenas os scores auxiliares de tagging (`bjet1_tag_*`, `bjet1_hhbtag`) em NaN.
+    3. Covariâncias da MET recebem compressão `sign(x) * log1p(|x|)`.
     """
     if df.attrs.get("preprocessed_cont", False):
         return df
@@ -104,15 +117,27 @@ def apply_physical_preprocessing(
                 df.loc[df[flag] == 0, cols] = np.nan
 
     if "reg_dnn_moe_has_jet_pair" in df.columns:
-        b1_cols = [c for c in continuous_features if c.startswith("reg_dnn_moe_bjet1_")]
-        if b1_cols:
+        b1_p4_cols = [c for c in continuous_features if c in BJET1_P4_COLS]
+        b1_aux_cols = [
+            c for c in continuous_features if c.startswith("reg_dnn_moe_bjet1_") and c not in BJET1_P4_COLS
+        ]
+        if b1_p4_cols or b1_aux_cols:
             no_pair = df["reg_dnn_moe_has_jet_pair"] == 0
             if mask_bjet1_always_on_no_pair:
-                df.loc[no_pair, b1_cols] = np.nan
+                b1_missing = no_pair
             elif "reg_dnn_moe_bjet1_e" in df.columns:
-                b1_zero = no_pair & (df["reg_dnn_moe_bjet1_e"].fillna(0.0) <= 0.0)
-                if b1_zero.any():
-                    df.loc[b1_zero, b1_cols] = np.nan
+                b1_e = df["reg_dnn_moe_bjet1_e"].to_numpy(np.float64)
+                b1_missing = no_pair & ((~np.isfinite(b1_e)) | (b1_e <= 0.0))
+            else:
+                b1_missing = pd.Series(False, index=df.index)
+
+            if np.any(b1_missing):
+                if b1_p4_cols:
+                    # Preserva zero FÍSICO antes da padronização z-score: z = (0 - μ)/σ -> phys = z*σ + μ = 0.0
+                    df.loc[b1_missing, b1_p4_cols] = 0.0
+                if b1_aux_cols:
+                    # Scores auxiliares de tagging ausentes viram NaN -> z = 0 após padronização
+                    df.loc[b1_missing, b1_aux_cols] = np.nan
 
     for c in cov_cols:
         if c in df.columns:
@@ -322,30 +347,54 @@ def check_four_vectors(
     strict: bool = True,
     verbose: bool = True,
 ) -> pd.DataFrame:
-    """Confere se os 4-vetores entregues à LBN:
-    1) Zeram exatamente `bjet2` (`has_jet_pair!=1`) e `fatjet` (`has_fatjet!=1`), nunca vazando a média `μ`;
-    2) Satisfazem `E^2 >= |p|^2 - 1 GeV^2` nos eventos em que a partícula está presente.
+    """Executa DIRETAMENTE a camada `FourVectorsFromFeatures` sobre os tensores normalizados para verificar:
+    1) Zeragem exata `(0,0,0,0)` de `bjet2` (`has_jet_pair!=1`), `fatjet` (`has_fatjet!=1`) e `bjet1` em 0-jet,
+       garantindo que a média de treino `μ` jamais vaze para a LBN;
+    2) Preservação de `bjet1` em eventos 1-jet (`has_jet_pair!=1` com 1 AK4 real) e satisfação de
+       `E^2 >= |p|^2 - 1 GeV^2` em todas as partículas presentes.
     """
+    import tensorflow as tf
+
+    from src.models.affine_layers import FourVectorsFromFeatures
+
     lbn_idx, _ = get_lbn_column_indices(continuous_features, lbn_particles)
     n_sub = min(int(n), len(x_cont))
-    phys = (x_cont[:n_sub][:, lbn_idx] * scaler.std[lbn_idx] + scaler.mean[lbn_idx]).reshape(
+
+    b1_slot = lbn_particles.index("bjet1") if "bjet1" in lbn_particles else None
+    b2_slot = lbn_particles.index("bjet2") if "bjet2" in lbn_particles else None
+    fj_slot = lbn_particles.index("fatjet") if "fatjet" in lbn_particles else None
+
+    fv_layer = FourVectorsFromFeatures(
+        idx=lbn_idx.tolist(),
+        mean=scaler.mean[lbn_idx].tolist(),
+        std=scaler.std[lbn_idx].tolist(),
+        n_particles=len(lbn_particles),
+        bjet1_slot=b1_slot,
+        bjet2_slot=b2_slot,
+        fatjet_slot=fj_slot,
+        mask_bjet1_without_pair=mask_bjet1_without_pair,
+        name="check_fv_layer",
+    )
+
+    x_sub_tf = tf.constant(x_cont[:n_sub], dtype=tf.float32)
+    pair_arr = (
+        x_cat["has_jet_pair"][:n_sub].astype(np.int32)
+        if "has_jet_pair" in x_cat
+        else np.ones((n_sub, 1), dtype=np.int32)
+    )
+    fat_arr = (
+        x_cat["has_fatjet"][:n_sub].astype(np.int32)
+        if "has_fatjet" in x_cat
+        else np.ones((n_sub, 1), dtype=np.int32)
+    )
+    with tf.device("/CPU:0"):
+        phys = fv_layer([x_sub_tf, tf.constant(pair_arr), tf.constant(fat_arr)]).numpy()
+
+    raw_phys_unmasked = (x_cont[:n_sub][:, lbn_idx] * scaler.std[lbn_idx] + scaler.mean[lbn_idx]).reshape(
         -1, len(lbn_particles), 4
     )
-    has_pair = x_cat["has_jet_pair"][:n_sub, 0] == 1 if "has_jet_pair" in x_cat else np.ones(n_sub, dtype=bool)
-    has_fat = x_cat["has_fatjet"][:n_sub, 0] == 1 if "has_fatjet" in x_cat else np.ones(n_sub, dtype=bool)
-
-    # Aplica exatamente as mesmas máscaras físicas da camada FourVectorsFromFeatures
-    for k, name in enumerate(lbn_particles):
-        if name == "fatjet":
-            phys[~has_fat, k, :] = 0.0
-        elif name == "bjet2":
-            phys[~has_pair, k, :] = 0.0
-        elif name == "bjet1":
-            if mask_bjet1_without_pair:
-                phys[~has_pair, k, :] = 0.0
-            else:
-                no_pair_zero = (~has_pair) & (phys[:, k, 0] <= 1e-3)
-                phys[no_pair_zero, k, :] = 0.0
+    has_pair = pair_arr[:, 0] == 1
+    has_fat = fat_arr[:, 0] == 1
 
     m2 = phys[..., 0] ** 2 - (phys[..., 1:] ** 2).sum(axis=-1)
 
@@ -353,35 +402,40 @@ def check_four_vectors(
     for k, name in enumerate(lbn_particles):
         if name == "fatjet":
             present_mask = has_fat
-            absent_max = float(np.abs(phys[~has_fat, k, :]).max()) if (~has_fat).any() else 0.0
         elif name == "bjet2":
             present_mask = has_pair
-            absent_max = float(np.abs(phys[~has_pair, k, :]).max()) if (~has_pair).any() else 0.0
-        elif name == "bjet1" and mask_bjet1_without_pair:
-            present_mask = has_pair
-            absent_max = float(np.abs(phys[~has_pair, k, :]).max()) if (~has_pair).any() else 0.0
+        elif name == "bjet1":
+            if mask_bjet1_without_pair:
+                present_mask = has_pair
+            else:
+                # Presente se houver par AK4 OU se for evento 1-jet com energia física > 10 MeV antes da máscara
+                present_mask = has_pair | (raw_phys_unmasked[:, k, 0] > 1e-2)
         else:
-            present_mask = phys[:, k, 0] > 1e-3
-            absent_max = float(np.abs(phys[~present_mask, k, :]).max()) if (~present_mask).any() else 0.0
+            present_mask = phys[:, k, 0] > 1e-2
 
+        absent_mask = ~present_mask
+        absent_max = float(np.abs(phys[absent_mask, k, :]).max()) if absent_mask.any() else 0.0
         ok = m2[present_mask, k] >= -1.0
         frac = float(ok.mean()) if len(ok) > 0 else 1.0
         rows.append(
             {
                 "particula": name,
                 "frac_fisica": frac,
-                "n_presentes": int(len(ok)),
+                "n_presentes": int(present_mask.sum()),
+                "n_ausentes": int(absent_mask.sum()),
                 "max_abs_quando_ausente": absent_max,
             }
         )
         if verbose:
             print(
                 f"  {name:9s}: {frac:.4f} com E² >= |p|² - 1 GeV² "
-                f"(presentes={len(ok):,d} | max|p_μ| ausente={absent_max:.1e})"
+                f"(presentes={int(present_mask.sum()):,d}, ausentes={int(absent_mask.sum()):,d} | "
+                f"max|p_μ| ausente={absent_max:.1e})"
             )
         if strict and (frac <= 0.99 or absent_max > 1e-5):
             raise AssertionError(
-                f"{name}: falha na validação física (frac={frac:.4f}, absent_max={absent_max:.2e})."
+                f"{name}: falha na validação física via FourVectorsFromFeatures "
+                f"(frac={frac:.4f}, absent_max={absent_max:.2e})."
             )
     return pd.DataFrame(rows)
 

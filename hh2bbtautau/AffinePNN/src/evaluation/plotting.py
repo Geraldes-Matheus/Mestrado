@@ -9,7 +9,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src.evaluation.roc import auc_from_roc, auc_unweighted, compute_curves_for_kappa, weighted_roc
+from src.evaluation.roc import (
+    auc_from_roc,
+    auc_unweighted,
+    compute_curves_for_kappa,
+    unique_roc_for_interp,
+    weighted_roc,
+)
 from src.evaluation.significance import ams_significance_scan
 
 MODEL_COLORS = {
@@ -158,15 +164,15 @@ def plot_roc_and_pr_grid(
         for i, (name, sc) in enumerate(scores.items()):
             d = sc[fk]
             fpr, tpr = weighted_roc(d["y"], d["s"], d["w"])
-            tpr_m = np.maximum.accumulate(tpr)
+            fpr_u, tpr_u = unique_roc_for_interp(fpr, tpr)
             auc_val = auc_from_roc(fpr, tpr)
             col = MODEL_COLORS.get(name, f"C{i}")
             ls = MODEL_STYLES.get(name, "-")
 
-            ax_roc.plot(tpr, np.clip(fpr, 1e-4, 1.0), color=col, ls=ls, lw=2.0, label=f"{name}\nAUC$_w$={auc_val:.4f}")
-            mask = tpr_m > 1e-3
-            purity_bal = tpr_m[mask] / np.maximum(tpr_m[mask] + fpr[mask], 1e-12)
-            ax_pr.plot(tpr_m[mask], purity_bal, color=col, ls=ls, lw=2.0, label=name)
+            ax_roc.plot(tpr_u, np.clip(fpr_u, 1e-4, 1.0), color=col, ls=ls, lw=2.0, label=f"{name}\nAUC$_w$={auc_val:.4f}")
+            mask = tpr_u > 1e-3
+            purity_bal = tpr_u[mask] / np.maximum(tpr_u[mask] + fpr_u[mask], 1e-12)
+            ax_pr.plot(tpr_u[mask], purity_bal, color=col, ls=ls, lw=2.0, label=name)
 
         ax_roc.set_yscale("log")
         ax_roc.set_ylim(1e-4, 1.0)
@@ -791,8 +797,8 @@ def plot_scores_vs_events_log_per_kappa(
         ax[1].set_yscale("log")
         ax[1].set_xlim(0.0, 1.0)
         ax[1].set_xlabel(r"Score da Rede $P(\mathrm{HH})$")
-        ax[1].set_ylabel(r"Eventos Ponderados $\sum w_{\mathrm{phys}}^+$ por bin (escala log)")
-        ax[1].set_title(rf"{title_tag} — Score vs Rendimento Físico ($\kappa_\lambda = {k:g}$)", fontweight="bold")
+        ax[1].set_ylabel(r"Eventos Ponderados $\sum w_{\mathrm{clf}}$ ($w \geq 0$, escala log)")
+        ax[1].set_title(rf"{title_tag} — Distribuição de Classificação ($w \geq 0$, $\kappa_\lambda = {k:g}$)", fontweight="bold")
         ax[1].legend(fontsize=8.2, ncol=1 if is_single else 2)
         ax[1].grid(True, which="both", alpha=0.3)
 
@@ -1289,8 +1295,8 @@ def plot_signal_eff_vs_bkg_rejection(
         for i, (m_name, sc) in enumerate(scores.items()):
             d = sc[fk]
             fpr, tpr = weighted_roc(d["y"], d["s"], d["w"])
-            tpr_m = np.maximum.accumulate(tpr)
-            eps_b = np.clip(np.interp(eff_grid, tpr_m, fpr), 1e-4, 1.0)
+            fpr_u, tpr_u = unique_roc_for_interp(fpr, tpr)
+            eps_b = np.clip(np.interp(eff_grid, tpr_u, fpr_u), 1e-4, 1.0)
             rej = 1.0 / eps_b
             rej_by_model[m_name] = rej
 
@@ -1628,23 +1634,78 @@ def plot_physical_yields_and_significance(
     w_bar = 0.72 / max(len(model_names), 1)
 
     panels = [
-        ("S/B", rf"Razão Física $S / B$ ($\epsilon_S = {chosen_eff:g}$, $w_{{\mathrm{{NLO}}}}$ assinado)"),
-        ("Z_asimov", rf"Significância de Asimov $Z_A$ ($\epsilon_S = {chosen_eff:g}$, $w_{{\mathrm{{NLO}}}}$ assinado)"),
+        ("S/B", "S/B_err_mc", rf"Razão Física $S / B$ ($\epsilon_S^+ = {chosen_eff:g}$, $w_{{\mathrm{{NLO}}}}$ assinado)"),
+        ("Z_asimov", None, rf"Asimov Nominal $Z_A$ ($\epsilon_S^+ = {chosen_eff:g}$, $w_{{\mathrm{{NLO}}}}$ assinado)"),
     ]
-    for p_idx, (col_key, title) in enumerate(panels):
+    for p_idx, (col_key, err_key, title) in enumerate(panels):
         ax = axes[0, p_idx]
+        has_undefined = False
         for i, m_name in enumerate(model_names):
             df_m = yields_tables[m_name]
             sub = df_m[np.isclose(df_m["eff_sinal"], chosen_eff)].sort_values("kappa")
-            vals = np.nan_to_num(sub[col_key].to_numpy(np.float64), nan=0.0)
+            raw_vals = sub[col_key].to_numpy(np.float64)
+            err_vals = (
+                sub[err_key].to_numpy(np.float64)
+                if (err_key is not None and err_key in sub.columns)
+                else np.full_like(raw_vals, np.nan)
+            )
             offs = (i - (len(model_names) - 1) / 2.0) * w_bar
             col = MODEL_COLORS.get(m_name, f"C{i}")
-            ax.bar(x + offs, vals, w_bar, color=col, alpha=0.88, label=m_name)
+
+            valid = np.isfinite(raw_vals)
+            if np.any(valid):
+                yerr_v = np.where(np.isfinite(err_vals[valid]), err_vals[valid], 0.0) if err_key else None
+                ax.bar(
+                    x[valid] + offs,
+                    raw_vals[valid],
+                    w_bar,
+                    yerr=yerr_v,
+                    capsize=3 if err_key else 0,
+                    color=col,
+                    alpha=0.88,
+                    label=m_name,
+                )
+            else:
+                ax.bar([], [], w_bar, color=col, alpha=0.88, label=m_name)
+
+            # Identifica visualmente pontos não definidos (S <= 0 ou B <= 0 por pesos negativos NLO)
+            # em vez de transformá-los silenciosamente em barra zero!
+            undef = ~valid
+            if np.any(undef):
+                has_undefined = True
+                ax.scatter(
+                    x[undef] + offs,
+                    np.zeros(int(undef.sum())),
+                    marker="X",
+                    s=70,
+                    color="#d62728",
+                    edgecolors="black",
+                    linewidths=0.7,
+                    zorder=6,
+                    label="Indefinido ($S\\leq 0$ ou $B\\leq 0$)" if i == 0 else None,
+                )
+                for xu in x[undef] + offs:
+                    ax.annotate(
+                        "N/D\n($B\\leq 0$)",
+                        xy=(float(xu), 0.0),
+                        xytext=(0, 8),
+                        textcoords="offset points",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7.2,
+                        color="#b00020",
+                        fontweight="bold",
+                    )
+
+        ax.axhline(0.0, color="gray", lw=0.8, alpha=0.6)
         ax.set_xticks(x)
         ax.set_xticklabels([rf"$\kappa_\lambda={k:g}$" for k in kappas])
-        ax.set_title(title, fontsize=10.2, fontweight="bold")
+        ax.set_title(title, fontsize=10.0, fontweight="bold")
         ax.grid(axis="y", alpha=0.3)
-        ax.legend(fontsize=8.5)
+        ax.legend(fontsize=8.0)
+        if has_undefined:
+            ymin_cur, ymax_cur = ax.get_ylim()
+            ax.set_ylim(min(ymin_cur, -0.04 * max(ymax_cur, 1.0)), max(ymax_cur * 1.15, 0.2))
 
     if sig_ratio_tables:
         ax_sr = axes[0, 2]

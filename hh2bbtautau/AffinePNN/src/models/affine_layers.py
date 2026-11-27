@@ -146,8 +146,10 @@ class FourVectorsFromFeatures(keras.layers.Layer):
                 if self.mask_bjet1_without_pair:
                     slot_masks.append(present_pair)
                 else:
-                    # Se não há par AK4 e bjet1 também veio zerado (E <= 1e-3), garante 0 exato sem drift float32
-                    b1_has_energy = ops.cast(phys[:, p, 0:1] > 1e-3, "float32")
+                    # Como bjet1 ausente em evento 0-jet é padronizado como zero FÍSICO z = (0 - μ)/σ,
+                    # aqui phys[:, p, 0] ≈ 0.0 (enquanto em evento 1-jet E > 20 GeV >> 1e-2).
+                    # Esta máscara garante zero bit-exato (0,0,0,0) eliminando qualquer resíduo float32.
+                    b1_has_energy = ops.cast(phys[:, p, 0:1] > 1e-2, "float32")
                     slot_masks.append(ops.maximum(present_pair, b1_has_energy))
             else:
                 slot_masks.append(ones)

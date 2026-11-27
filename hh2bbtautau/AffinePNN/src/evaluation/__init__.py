@@ -59,6 +59,7 @@ from src.evaluation.roc import (
     binary_metrics_at_threshold,
     compute_curves_for_kappa,
     prepare_non_negative_weights,
+    unique_roc_for_interp,
     univariate_feature_aucs,
     weighted_roc,
 )
@@ -138,6 +139,7 @@ __all__ = [
     "seed_study",
     "significance_ratio_table",
     "summarize_scores",
+    "unique_roc_for_interp",
     "univariate_feature_aucs",
     "weighted_roc",
     "working_point_table",

@@ -45,7 +45,9 @@ def prepare_non_negative_weights(
 
 
 def weighted_roc(y: np.ndarray, s: np.ndarray, w: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """Curva ROC monotônica ponderada por pesos não-negativos `max(w, 0)`. `y=1` indica sinal. Retorna `(fpr, tpr)`."""
+    """Curva ROC monotonicamente não-decrescente ponderada por pesos não-negativos `max(w, 0)`.
+    `y=1` indica sinal. Retorna `(fpr, tpr)`.
+    """
     y_bool, w_pos, w_sig_tot, w_bkg_tot = prepare_non_negative_weights(y, w)
     s_arr = np.asarray(s, dtype=np.float64)
 
@@ -57,6 +59,22 @@ def weighted_roc(y: np.ndarray, s: np.ndarray, w: np.ndarray | None = None) -> t
     fpr = np.clip(np.r_[0.0, fp / w_bkg_tot], 0.0, 1.0)
     tpr = np.clip(np.r_[0.0, tp / w_sig_tot], 0.0, 1.0)
     return fpr, tpr
+
+
+def unique_roc_for_interp(fpr: np.ndarray, tpr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Elimina coordenadas `TPR` repetidas preservando a PRIMEIRA ocorrência de cada `TPR`.
+
+    Quando pesos negativos são truncados em zero (`max(w, 0)`) ou passos de limiar adicionam apenas
+    eventos de fundo, `TPR` permanece constante enquanto `FPR` cresce (`monotonicamente não-decrescente`,
+    mas não estritamente crescente). Preservar o primeiro índice de cada `TPR` seleciona a MENOR
+    eficiência de fundo alcançável para aquela eficiência de sinal e torna o eixo `TPR` estritamente
+    crescente para `np.interp`. Retorna `(fpr_unique, tpr_unique)`.
+    """
+    fpr_m = np.maximum.accumulate(np.clip(np.asarray(fpr, dtype=np.float64), 0.0, 1.0))
+    tpr_m = np.maximum.accumulate(np.clip(np.asarray(tpr, dtype=np.float64), 0.0, 1.0))
+    _, first_idx = np.unique(tpr_m, return_index=True)
+    first_idx = np.sort(first_idx)
+    return fpr_m[first_idx], tpr_m[first_idx]
 
 
 def auc_from_roc(fpr: np.ndarray, tpr: np.ndarray) -> float:
@@ -153,9 +171,10 @@ def compute_curves_for_kappa(
     last = np.r_[np.flatnonzero(np.diff(s_sorted)), len(s_sorted) - 1]
     tpr_full = np.r_[0.0, np.clip(tp_cum[last], 0.0, 1.0)]
     fpr_full = np.r_[0.0, np.clip(fp_cum[last], 0.0, 1.0)]
+    fpr_u, tpr_u = unique_roc_for_interp(fpr_full, tpr_full)
 
     eff_grid = np.linspace(0.05, 0.995, 300)
-    fpr_interp = np.interp(eff_grid, tpr_full, fpr_full)
+    fpr_interp = np.interp(eff_grid, tpr_u, fpr_u)
     prec_curve = eff_grid / np.maximum(eff_grid + fpr_interp, 1e-12)
     inv_eps_b = 1.0 / np.maximum(fpr_interp, 1e-5)
 

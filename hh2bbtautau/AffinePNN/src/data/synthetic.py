@@ -74,9 +74,13 @@ def generate_synthetic_parquets(
             b2_e, b2_px, b2_py, b2_pz = _make_four_vector(rng, n, b_scale * 0.75, 4.18)
             fj_e, fj_px, fj_py, fj_pz = _make_four_vector(rng, n, b_scale * 2.2, 125.0)
 
-            # Zera objetos ausentes exatamente como nos parquets reais
+            # Zera objetos ausentes exatamente como nos parquets reais (incluindo eventos 0-jet e 1-jet quando has_jet_pair==0!)
+            is_no_pair = has_jet_pair == 0
+            is_0jet = is_no_pair & (rng.random(size=n) < 0.45)
+            for arr in (b1_e, b1_px, b1_py, b1_pz):
+                arr[is_0jet] = 0.0
             for arr in (b2_e, b2_px, b2_py, b2_pz):
-                arr[has_jet_pair == 0] = 0.0
+                arr[is_no_pair] = 0.0
             for arr in (fj_e, fj_px, fj_py, fj_pz):
                 arr[has_fatjet == 0] = 0.0
 
@@ -110,6 +114,7 @@ def generate_synthetic_parquets(
                 w_norm = (signs * rng.lognormal(mean=-8.5, sigma=0.25, size=n)).astype(np.float32)
                 samples = np.full(n, f"{group}_kt1_powheg")
 
+            b1_present = (~is_0jet).astype(np.float32)
             b2_present = (has_jet_pair == 1).astype(np.float32)
             data = {
                 "reg_dnn_moe_met_px": rng.normal(0.0, 35.0, size=n).astype(np.float32),
@@ -129,10 +134,10 @@ def generate_synthetic_parquets(
                 "reg_dnn_moe_bjet1_px": b1_px,
                 "reg_dnn_moe_bjet1_py": b1_py,
                 "reg_dnn_moe_bjet1_pz": b1_pz,
-                "reg_dnn_moe_bjet1_tag_b": np.clip(rng.normal(btag_mu, 0.18, size=n), 0.0, 1.0).astype(np.float32),
-                "reg_dnn_moe_bjet1_tag_cvsb": np.clip(rng.uniform(0.0, 1.0, size=n), 0.0, 1.0).astype(np.float32),
-                "reg_dnn_moe_bjet1_tag_cvsl": np.clip(rng.uniform(0.0, 1.0, size=n), 0.0, 1.0).astype(np.float32),
-                "reg_dnn_moe_bjet1_hhbtag": np.clip(rng.normal(btag_mu, 0.15, size=n), 0.0, 1.0).astype(np.float32),
+                "reg_dnn_moe_bjet1_tag_b": (np.clip(rng.normal(btag_mu, 0.18, size=n), 0.0, 1.0) * b1_present).astype(np.float32),
+                "reg_dnn_moe_bjet1_tag_cvsb": (np.clip(rng.uniform(0.0, 1.0, size=n), 0.0, 1.0) * b1_present).astype(np.float32),
+                "reg_dnn_moe_bjet1_tag_cvsl": (np.clip(rng.uniform(0.0, 1.0, size=n), 0.0, 1.0) * b1_present).astype(np.float32),
+                "reg_dnn_moe_bjet1_hhbtag": (np.clip(rng.normal(btag_mu, 0.15, size=n), 0.0, 1.0) * b1_present).astype(np.float32),
                 "reg_dnn_moe_bjet2_e": b2_e,
                 "reg_dnn_moe_bjet2_px": b2_px,
                 "reg_dnn_moe_bjet2_py": b2_py,

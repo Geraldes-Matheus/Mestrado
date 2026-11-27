@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 from src.evaluation.plotting import MODEL_COLORS, MODEL_STYLES, _finalize_fig
-from src.evaluation.roc import auc_from_roc, prepare_non_negative_weights, weighted_roc
+from src.evaluation.roc import auc_from_roc, prepare_non_negative_weights, unique_roc_for_interp, weighted_roc
 
 ScoresDict = dict[str, dict[float, dict[str, np.ndarray]]]
 
@@ -97,7 +97,7 @@ def metrics_vs_score(
     """Precision, Recall, F1, ε_B, rejeição e acurácia balanceada para cortes `s >= t`, t ∈ [0, 1].
 
     - Em `mode="balanced"` (avaliação de classificação), utiliza pesos não-negativos `max(w, 0)`
-      validados por classe para garantir monotonicidade estrita de `recall(t)` e `eps_b(t)`.
+      validados por classe para garantir curvas acumuladas monotonicamente não-decrescentes.
     - Em `mode="physical"`, reporta também rendimentos `S` e `B` com os pesos NLO assinados originais.
     """
     if mode not in ("balanced", "physical"):
@@ -200,10 +200,9 @@ def working_point_table(
                 "recall@best": float(c["recall"][b]),
                 "eps_b@best": float(c["eps_b"][b]),
             }
-            tpr_m = np.maximum.accumulate(np.clip(tpr, 0.0, 1.0))
-            fpr_m = np.maximum.accumulate(np.clip(fpr, 0.0, 1.0))
+            fpr_u, tpr_u = unique_roc_for_interp(fpr, tpr)
             for e in sig_eff_points:
-                eb = float(np.interp(e, tpr_m, fpr_m))
+                eb = float(np.interp(e, tpr_u, fpr_u))
                 row[f"rej@effS={e:g}"] = 1.0 / max(eb, 1e-6)
             rows.append(row)
     return pd.DataFrame(rows)
@@ -412,21 +411,81 @@ def _draw_score_events(
     weighted: bool,
     signal_scale: float | str | None,
     kappa: float,
+    weight_mode: str = "non_negative",
 ) -> None:
+    """Desenha distribuição do score em escala log com convenção unificada de pesos:
+    - `weighted=False` ou `weight_mode="unweighted"`: contagens brutas de eventos MC (`w = 1`).
+    - `weighted=True` e `weight_mode="non_negative"` (padrão de classificação): usa `w_clf = max(w_phys, 0)`
+      POR EVENTO antes de histogramar (consistente com `plotting.py` e com as curvas ROC/PR).
+    - `weighted=True` e `weight_mode="signed"` (rendimento físico NLO): soma `w_phys` assinado por bin
+      sem zerar bins negativos silenciosamente, destacando explicitamente bins com soma líquida `< 0`.
+    """
     s, w, cls, y = d["s"], d["w"], d["cls"], d["y"].astype(bool)
-    wts = w if weighted else None
+    mode_eff = "unweighted" if not weighted else weight_mode
+    if mode_eff not in ("unweighted", "non_negative", "signed"):
+        raise ValueError("weight_mode deve ser 'non_negative', 'signed' ou 'unweighted'.")
+
     bkg_classes = [c for c in class_labels if c != 2]
     bkg_colors = {0: "#7fb3d5", 1: "#f5b041"}
+    centers = 0.5 * (bins[:-1] + bins[1:])
+
+    if mode_eff == "signed":
+        # Rendimento físico NLO assinado: plota |Σ w_phys| em escala log e destaca bins líquidos negativos!
+        pos_vals = []
+        for c in list(bkg_classes) + [2]:
+            m = (cls == c) & (~y) if c != 2 else y
+            col = bkg_colors.get(c, "#c0392b" if c == 2 else f"C{c}")
+            cname = f"HH $\\kappa_\\lambda={kappa:g}$" if c == 2 else class_labels[c]
+            h_net = _hist(s[m], w[m], bins)
+            h_err = np.sqrt(_hist(s[m], w[m] ** 2, bins))
+            net_sum = float(h_net.sum())
+            n_neg_bins = int((h_net < 0).sum())
+
+            h_pos = np.where(h_net > 0, h_net, 0.0)
+            if np.any(h_pos > 0):
+                pos_vals.append(h_pos[h_pos > 0])
+            lbl = f"{cname} ($\\Sigma w$={net_sum:.3g}" + (f", {n_neg_bins} bins<0)" if n_neg_bins else ")")
+            ax.stairs(np.maximum(h_pos, 1e-12), bins, color=col, lw=2.0, label=lbl)
+            pos_b = h_net > 0
+            if np.any(pos_b):
+                ax.errorbar(centers[pos_b], h_net[pos_b], yerr=h_err[pos_b], fmt="none", ecolor=col, alpha=0.55, elinewidth=1.0)
+            neg_b = h_net < 0
+            if np.any(neg_b):
+                pos_vals.append(np.abs(h_net[neg_b]))
+                ax.errorbar(
+                    centers[neg_b],
+                    np.abs(h_net[neg_b]),
+                    yerr=h_err[neg_b],
+                    fmt="v",
+                    ms=5,
+                    mfc="none",
+                    mec=col,
+                    ecolor=col,
+                    lw=1.0,
+                    label=f"{cname}: $|\\Sigma w|$ (bin NLO $< 0$)",
+                )
+        ax.set_yscale("log")
+        if pos_vals:
+            all_p = np.concatenate(pos_vals)
+            ax.set_ylim(max(float(all_p.min()) * 0.3, 1e-6), float(all_p.max()) * 30.0)
+        ax.set_xlim(0.0, 1.0)
+        ax.set_xlabel(r"Score da rede $P(\mathrm{HH})$")
+        ax.set_ylabel(r"Rendimento NLO assinado $|\sum w_{\mathrm{phys}}|$")
+        ax.grid(alpha=0.3, which="both")
+        ax.legend(fontsize=7.5, loc="upper center")
+        return
+
+    wts = None if mode_eff == "unweighted" else np.clip(np.asarray(w, dtype=np.float64), 0.0, None)
     bottom = np.zeros(len(bins) - 1)
     b_tot = 0.0
     for c in bkg_classes:
         m = (cls == c) & (~y)
-        h = np.clip(_hist(s[m], None if wts is None else wts[m], bins), 0.0, None)
+        h = _hist(s[m], None if wts is None else wts[m], bins)
         b_tot += h.sum()
         ax.stairs(bottom + h, bins, baseline=bottom, fill=True, color=bkg_colors.get(c, f"C{c}"), alpha=0.85,
                   label=f"{class_labels[c]} (Σ={h.sum():.3g})")
         bottom = bottom + h
-    hs = np.clip(_hist(s[y], None if wts is None else wts[y], bins), 0.0, None)
+    hs = _hist(s[y], None if wts is None else wts[y], bins)
     scale = 1.0
     if signal_scale == "auto":
         scale = b_tot / hs.sum() if hs.sum() > 0 else 1.0
@@ -442,7 +501,7 @@ def _draw_score_events(
         ax.set_ylim(max(pos.min() * 0.3, 1e-6), pos.max() * 30)
     ax.set_xlim(0.0, 1.0)
     ax.set_xlabel(r"Score da rede $P(\mathrm{HH})$")
-    ax.set_ylabel("Eventos esperados (Σ w$_{phys}$)" if weighted else "Eventos MC (não ponderados)")
+    ax.set_ylabel(r"Eventos ponderados ($\sum w_{\mathrm{clf}}$, $w \geq 0$)" if weighted else "Eventos MC (não ponderados)")
     ax.grid(alpha=0.3, which="both")
     ax.legend(fontsize=7.8, loc="upper center")
 
@@ -454,6 +513,7 @@ def plot_score_events_log(
     models: Sequence[str] | None = None,
     n_bins: int = 40,
     weighted: bool = True,
+    weight_mode: str = "non_negative",
     signal_scale: float | str | None = None,
     save_path: str | Path | None = None,
     show: bool = True,
@@ -463,7 +523,9 @@ def plot_score_events_log(
     bins = np.linspace(0.0, 1.0, int(n_bins) + 1)
     fig, axes = plt.subplots(1, len(names), figsize=(6.4 * len(names), 4.8), sharey=True, squeeze=False)
     for i, n in enumerate(names):
-        _draw_score_events(axes[0, i], _get(scores, n, kappa), class_labels, bins, weighted, signal_scale, kappa)
+        _draw_score_events(
+            axes[0, i], _get(scores, n, kappa), class_labels, bins, weighted, signal_scale, kappa, weight_mode=weight_mode
+        )
         axes[0, i].set_title(rf"{n} — $\kappa_\lambda = {kappa:g}$", fontweight="bold")
     fig.tight_layout()
     return _finalize_fig(fig, save_path=save_path, show=show)
@@ -476,6 +538,7 @@ def plot_score_events_log_kappas(
     kappas: Sequence[float] | None = None,
     n_bins: int = 40,
     weighted: bool = True,
+    weight_mode: str = "non_negative",
     signal_scale: float | str | None = None,
     save_path: str | Path | None = None,
     show: bool = True,
@@ -488,7 +551,7 @@ def plot_score_events_log_kappas(
     fig, axes = plt.subplots(nrows, ncols, figsize=(6.4 * ncols, 4.6 * nrows), squeeze=False)
     for j, k in enumerate(ks):
         ax = axes.ravel()[j]
-        _draw_score_events(ax, _get(scores, model_name, k), class_labels, bins, weighted, signal_scale, k)
+        _draw_score_events(ax, _get(scores, model_name, k), class_labels, bins, weighted, signal_scale, k, weight_mode=weight_mode)
         ax.set_title(rf"$\kappa_\lambda = {k:g}$", fontweight="bold")
     for ax in axes.ravel()[len(ks):]:
         ax.axis("off")
@@ -507,16 +570,16 @@ def plot_score_events_overlay(
     save_path: str | Path | None = None,
     show: bool = True,
 ) -> plt.Figure:
-    """Comparação no mesmo eixo: sinal (linha cheia) e fundo total (preenchido/tracejado) de cada modelo."""
+    """Comparação no mesmo eixo: sinal (linha cheia) e fundo total (tracejado) usando `w_clf = max(w_phys, 0)`."""
     names, _ = _resolve(scores, models, [kappa])
     bins = np.linspace(0.0, 1.0, int(n_bins) + 1)
     fig, ax = plt.subplots(figsize=(7.4, 4.8))
     for i, n in enumerate(names):
         d = _get(scores, n, kappa)
         y = d["y"].astype(bool)
-        w = d["w"] if weighted else None
-        hs = np.clip(_hist(d["s"][y], None if w is None else w[y], bins), 0, None)
-        hb = np.clip(_hist(d["s"][~y], None if w is None else w[~y], bins), 0, None)
+        w = np.clip(np.asarray(d["w"], dtype=np.float64), 0.0, None) if weighted else None
+        hs = _hist(d["s"][y], None if w is None else w[y], bins)
+        hb = _hist(d["s"][~y], None if w is None else w[~y], bins)
         if density:
             hs = hs / max(hs.sum(), 1e-30)
             hb = hb / max(hb.sum(), 1e-30)
@@ -526,7 +589,7 @@ def plot_score_events_overlay(
     ax.set_yscale("log")
     ax.set_xlim(0, 1)
     ax.set_xlabel(r"Score da rede $P(\mathrm{HH})$")
-    ax.set_ylabel("Fração de eventos" if density else ("Eventos esperados (Σ w$_{phys}$)" if weighted else "Eventos MC"))
+    ax.set_ylabel("Fração de eventos ($w \\geq 0$)" if density else (r"Eventos ponderados ($\sum w_{\mathrm{clf}}$, $w \geq 0$)" if weighted else "Eventos MC"))
     ax.grid(alpha=0.3, which="both")
     ax.legend(fontsize=8.5)
     ax.set_title(rf"{_title_models(names)} — $\kappa_\lambda = {kappa:g}$", fontweight="bold")
@@ -652,7 +715,8 @@ def generate_performance_report(
         for k in ks:
             tag = _ktag(k)
             plot_roc_kappa(scores, k, names, save_path=_p(f"roc_kl{tag}"), show=show)
-            plot_score_events_log(scores, k, class_labels, names, weighted=True, save_path=_p(f"score_events_log_kl{tag}"), show=show)
+            plot_score_events_log(scores, k, class_labels, names, weighted=True, weight_mode="non_negative", save_path=_p(f"score_events_log_kl{tag}"), show=show)
+            plot_score_events_log(scores, k, class_labels, names, weighted=True, weight_mode="signed", save_path=_p(f"score_signed_nlo_yields_log_kl{tag}"), show=show)
             plot_score_events_log(scores, k, class_labels, names, weighted=False, save_path=_p(f"score_mc_counts_log_kl{tag}"), show=show)
             plot_confusion_matrices(scores, k, class_labels, names, save_path=_p(f"confusion_matrix_kl{tag}"), show=show)
             if len(names) > 1:

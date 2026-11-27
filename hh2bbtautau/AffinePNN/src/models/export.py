@@ -36,7 +36,7 @@ import tensorflow as tf
 from tensorflow import keras
 
 from src.data.parquet_dataset import short_cat_name
-from src.data.preprocessing import CategoricalPreprocessor, FeatureScaler, make_inputs
+from src.data.preprocessing import BJET1_P4_COLS, CategoricalPreprocessor, FeatureScaler, make_inputs
 from src.models.affine_layers import AffineConditioning, LorentzBoostNetwork
 
 
@@ -221,7 +221,11 @@ def export_end2end_raw_onnx(
                 missing_rules.append((cat_idx, affected))
 
     mask_bjet1_always = bool(fcfg.get("mask_bjet1_always_on_no_pair", False))
-    bjet1_affected_np = np.array([[c.startswith("reg_dnn_moe_bjet1_") for c in cont_cols]], dtype=bool)
+    bjet1_p4_np = np.array([[c in BJET1_P4_COLS for c in cont_cols]], dtype=bool)
+    bjet1_aux_np = np.array(
+        [[c.startswith("reg_dnn_moe_bjet1_") and (c not in BJET1_P4_COLS) for c in cont_cols]],
+        dtype=bool,
+    )
     bjet1_e_idx = cont_cols.index("reg_dnn_moe_bjet1_e") if "reg_dnn_moe_bjet1_e" in cont_cols else None
     has_pair_cat_idx = cat_cols.index("reg_dnn_moe_has_jet_pair") if "reg_dnn_moe_has_jet_pair" in cat_cols else None
 
@@ -256,21 +260,34 @@ def export_end2end_raw_onnx(
             mask_drop = tf.logical_and(flag_zero, affected_tf)
             is_valid = tf.logical_and(is_valid, tf.logical_not(mask_drop))
 
-        if has_pair_cat_idx is not None and bjet1_affected_np.any():
+        b1_p4_zero_mask = tf.zeros_like(is_valid)
+        if has_pair_cat_idx is not None and (bjet1_p4_np.any() or bjet1_aux_np.any()):
             no_pair_tf = tf.equal(raw_categorical[:, has_pair_cat_idx : has_pair_cat_idx + 1], 0)
             if mask_bjet1_always:
-                b1_drop = tf.logical_and(no_pair_tf, tf.constant(bjet1_affected_np, dtype=tf.bool))
-                is_valid = tf.logical_and(is_valid, tf.logical_not(b1_drop))
+                b1_missing_ev = no_pair_tf
             elif bjet1_e_idx is not None:
                 b1_e_raw = raw_continuous[:, bjet1_e_idx : bjet1_e_idx + 1]
-                b1_zero_tf = tf.logical_or(tf.logical_not(tf.math.is_finite(b1_e_raw)), b1_e_raw <= 0.0)
-                b1_drop = tf.logical_and(
-                    tf.logical_and(no_pair_tf, b1_zero_tf),
-                    tf.constant(bjet1_affected_np, dtype=tf.bool),
-                )
-                is_valid = tf.logical_and(is_valid, tf.logical_not(b1_drop))
+                b1_e_invalid = tf.logical_not(tf.math.is_finite(b1_e_raw))
+                for sv in sentinels:
+                    b1_e_invalid = tf.logical_or(
+                        b1_e_invalid,
+                        tf.equal(b1_e_raw, tf.constant(sv, dtype=tf.float32)),
+                    )
+                b1_missing_ev = tf.logical_and(no_pair_tf, tf.logical_or(b1_e_invalid, b1_e_raw <= 0.0))
+            else:
+                b1_missing_ev = tf.zeros_like(no_pair_tf)
+
+            if bjet1_aux_np.any():
+                # Scores auxiliares ausentes viram z = 0 após padronização (idêntico a NaN -> 0 no FeatureScaler)
+                b1_aux_drop = tf.logical_and(b1_missing_ev, tf.constant(bjet1_aux_np, dtype=tf.bool))
+                is_valid = tf.logical_and(is_valid, tf.logical_not(b1_aux_drop))
+            if bjet1_p4_np.any():
+                # Os 4 componentes do 4-vetor ausente permanecem como ZERO FÍSICO antes da padronização z-score!
+                b1_p4_zero_mask = tf.logical_and(b1_missing_ev, tf.constant(bjet1_p4_np, dtype=tf.bool))
+                is_valid = tf.logical_or(is_valid, b1_p4_zero_mask)
 
         x_safe = tf.where(is_valid, raw_continuous, tf.zeros_like(raw_continuous))
+        x_safe = tf.where(b1_p4_zero_mask, tf.zeros_like(x_safe), x_safe)
         abs_x = tf.math.abs(x_safe)
         # Equivalente exato em float32 a log1p(|x|) usando apenas operadores ONNX nativos (Log, Where, Square)
         log1p_abs = tf.where(
@@ -361,8 +378,73 @@ def verify_onnx_parity(
         raw_cat_cols[c] = sampled
         raw_cat_mat[:, j] = sampled
 
-    # Injeta alguns valores sentinelas (-9999) para testar a limpeza interna do grafo End-to-End
-    raw_cont[0, 10] = -9999.0
+    # Força explicitamente as 5 topologias físicas nos primeiros eventos do lote de paridade:
+    #   [0..15]  : 0-jet sem FatJet  (has_jet_pair=0, has_fatjet=0, bjet1=0, bjet2=0, fatjet=0)
+    #   [16..31] : 0-jet com FatJet  (has_jet_pair=0, has_fatjet=1, bjet1=0, bjet2=0, fatjet válido)
+    #   [32..47] : 1-jet sem FatJet  (has_jet_pair=0, has_fatjet=0, bjet1 válido, bjet2=0, fatjet=0)
+    #   [48..63] : 2-jet sem FatJet  (has_jet_pair=1, has_fatjet=0, bjet1 e bjet2 válidos, fatjet=0)
+    #   [64..79] : 2-jet com FatJet  (has_jet_pair=1, has_fatjet=1, todos os 5 objetos válidos)
+    def _set_valid_p4(rows_sl: slice, prefix: str, e_min: float = 65.0, mass: float = 4.18) -> None:
+        cols_p4 = [f"{prefix}_{comp}" for comp in ("e", "px", "py", "pz")]
+        if all(c in cont_cols for c in cols_p4):
+            idxs = [cont_cols.index(c) for c in cols_p4]
+            n_r = len(range(*rows_sl.indices(n_test_samples)))
+            px = rng.normal(0.0, 25.0, size=n_r).astype(np.float32)
+            py = rng.normal(0.0, 25.0, size=n_r).astype(np.float32)
+            pz = rng.normal(0.0, 35.0, size=n_r).astype(np.float32)
+            e = np.maximum(np.sqrt(px ** 2 + py ** 2 + pz ** 2 + mass ** 2), e_min).astype(np.float32)
+            raw_cont[rows_sl, idxs[0]] = e
+            raw_cont[rows_sl, idxs[1]] = px
+            raw_cont[rows_sl, idxs[2]] = py
+            raw_cont[rows_sl, idxs[3]] = pz
+
+    def _zero_prefix(rows_sl: slice, prefix: str) -> None:
+        idxs = [cont_cols.index(c) for c in cont_cols if c.startswith(prefix)]
+        if idxs:
+            raw_cont[rows_sl, idxs] = 0.0
+
+    has_forced_topologies = n_test_samples >= 80 and ("reg_dnn_moe_has_jet_pair" in cat_cols) and ("reg_dnn_moe_has_fatjet" in cat_cols)
+    if has_forced_topologies:
+        pair_j = cat_cols.index("reg_dnn_moe_has_jet_pair")
+        fat_j = cat_cols.index("reg_dnn_moe_has_fatjet")
+
+        for sl in (slice(0, 80),):
+            _set_valid_p4(sl, "reg_dnn_moe_vis_tau1", e_min=45.0, mass=1.777)
+            _set_valid_p4(sl, "reg_dnn_moe_vis_tau2", e_min=35.0, mass=1.777)
+
+        # 0-jet sem FatJet (0..16) e 0-jet com FatJet (16..32)
+        raw_cat_mat[0:32, pair_j] = 0
+        raw_cat_mat[0:16, fat_j] = 0
+        raw_cat_mat[16:32, fat_j] = 1
+        _zero_prefix(slice(0, 32), "reg_dnn_moe_bjet1_")
+        _zero_prefix(slice(0, 32), "reg_dnn_moe_bjet2_")
+        _zero_prefix(slice(0, 16), "reg_dnn_moe_fatjet_")
+        _set_valid_p4(slice(16, 32), "reg_dnn_moe_fatjet", e_min=250.0, mass=125.0)
+        # Testa também sentinela -9999.0 em bjet1_e num evento 0-jet!
+        if "reg_dnn_moe_bjet1_e" in cont_cols:
+            raw_cont[0, cont_cols.index("reg_dnn_moe_bjet1_e")] = -9999.0
+
+        # 1-jet sem FatJet (32..48)
+        raw_cat_mat[32:48, pair_j] = 0
+        raw_cat_mat[32:48, fat_j] = 0
+        _set_valid_p4(slice(32, 48), "reg_dnn_moe_bjet1", e_min=55.0, mass=4.18)
+        _zero_prefix(slice(32, 48), "reg_dnn_moe_bjet2_")
+        _zero_prefix(slice(32, 48), "reg_dnn_moe_fatjet_")
+
+        # 2-jet sem FatJet (48..64) e 2-jet com FatJet (64..80)
+        raw_cat_mat[48:80, pair_j] = 1
+        raw_cat_mat[48:64, fat_j] = 0
+        raw_cat_mat[64:80, fat_j] = 1
+        _set_valid_p4(slice(48, 80), "reg_dnn_moe_bjet1", e_min=65.0, mass=4.18)
+        _set_valid_p4(slice(48, 80), "reg_dnn_moe_bjet2", e_min=45.0, mass=4.18)
+        _zero_prefix(slice(48, 64), "reg_dnn_moe_fatjet_")
+        _set_valid_p4(slice(64, 80), "reg_dnn_moe_fatjet", e_min=260.0, mass=125.0)
+
+        for j, c in enumerate(cat_cols):
+            raw_cat_cols[c] = raw_cat_mat[:, j].copy()
+
+    # Injeta sentinela adicional em feature contínua auxiliar para testar limpeza interna do grafo End-to-End
+    raw_cont[1, 0] = -9999.0
     raw_kappa = rng.choice(np.asarray(kgrid, dtype=np.float32), size=(n_test_samples, 1))
 
     # Caminho 1: Pipeline Python + Keras
@@ -390,6 +472,37 @@ def verify_onnx_parity(
     ordered_tensors.append(tf.constant(keras_inputs["kappa_lambda"], dtype=tf.float32))
     with tf.device("/CPU:0"):
         probs_keras = keras.ops.convert_to_numpy(model(ordered_tensors, training=False)).astype(np.float32)
+
+    # Verifica diretamente a saída da camada FourVectorsFromFeatures nas 5 topologias forçadas
+    topologies_verified: list[str] = []
+    if has_forced_topologies:
+        from src.models.affine_layers import FourVectorsFromFeatures
+
+        fv_layers = [l for l in model.layers if isinstance(l, FourVectorsFromFeatures)]
+        if fv_layers:
+            fv_probe = keras.Model(model.inputs, fv_layers[0].output)
+            with tf.device("/CPU:0"):
+                fvs_out = keras.ops.convert_to_numpy(fv_probe(ordered_tensors, training=False))
+            mask_b1_cfg = bool(cfg["features"].get("mask_bjet1_always_on_no_pair", False))
+            if float(np.max(np.abs(fvs_out[0:32, 2, :]))) > 1e-5:
+                raise AssertionError("Falha LBN 0-jet: bjet1 não ficou exatamente zerado!")
+            if float(np.max(np.abs(fvs_out[0:48, 3, :]))) > 1e-5:
+                raise AssertionError("Falha LBN no-pair: bjet2 não ficou exatamente zerado!")
+            if not mask_b1_cfg and not bool(np.all(fvs_out[32:48, 2, 0] > 20.0)):
+                raise AssertionError("Falha LBN 1-jet: bjet1 válido não foi preservado!")
+            if not bool(np.all(fvs_out[48:80, 2, 0] > 20.0) and np.all(fvs_out[48:80, 3, 0] > 20.0)):
+                raise AssertionError("Falha LBN 2-jet: par de b-jets não foi preservado!")
+            if float(np.max(np.abs(fvs_out[0:16, 4, :]))) > 1e-5 or float(np.max(np.abs(fvs_out[32:64, 4, :]))) > 1e-5:
+                raise AssertionError("Falha LBN sem FatJet: fatjet não ficou exatamente zerado!")
+            if not bool(np.all(fvs_out[16:32, 4, 0] > 100.0) and np.all(fvs_out[64:80, 4, 0] > 100.0)):
+                raise AssertionError("Falha LBN com FatJet: fatjet válido não foi preservado!")
+            topologies_verified = [
+                "0jet_no_fatjet",
+                "0jet_with_fatjet",
+                "1jet_no_fatjet",
+                "2jet_no_fatjet",
+                "2jet_with_fatjet",
+            ]
 
     probs_default_dev = model.predict(keras_inputs, batch_size=256, verbose=0).astype(np.float32)
 
@@ -436,6 +549,7 @@ def verify_onnx_parity(
         "end2end_raw_onnx_mean_abs_diff": float(diff_e2e.mean()),
         "onnx_pre_vs_end2end_max_abs_diff": max_diff_pair,
         "default_device_vs_onnx_fp32_max_abs_diff": float(diff_gpu_tf32.max()),
+        "topologies_verified": topologies_verified,
         "status": "PASSED",
     }
 

@@ -17,6 +17,7 @@ from src.evaluation.roc import (
     auc_w,
     binary_metrics_at_threshold,
     compute_curves_for_kappa,
+    unique_roc_for_interp,
     weighted_roc,
 )
 from src.evaluation.score_distributions import score_per_kappa
@@ -36,7 +37,7 @@ def summarize_scores(
     for k, d in sc.items():
         y, s, w = d["y"], d["s"], d["w"]
         fpr, tpr = weighted_roc(y, s, w)
-        tpr_m = np.maximum.accumulate(tpr)
+        fpr_u, tpr_u = unique_roc_for_interp(fpr, tpr)
 
         bm = binary_metrics_at_threshold(y, s, w, thr=thr)
         curves = compute_curves_for_kappa(y, s, w, n_thr=200)
@@ -61,7 +62,7 @@ def summarize_scores(
             "best_f1_thr": float(curves["best_thr"]),
         }
         for e in sig_eff_points:
-            eps_b = float(np.interp(float(e), tpr_m, fpr))
+            eps_b = float(np.interp(float(e), tpr_u, fpr_u))
             row[f"eps_b@{e}"] = eps_b
             row[f"pur_w_bal@{e}"] = float(e / max(e + eps_b, 1e-12))
 

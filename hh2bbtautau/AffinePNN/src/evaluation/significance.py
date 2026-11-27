@@ -1,14 +1,17 @@
-"""Rendimentos físicos esperados com pesos NLO assinados (`S`, `B`, `S/B`, `S/sqrt(B)`, Asimov `Z_A`)
-e Significance Ratio `σ_ratio` balanceada (Anzalone et al., Eq. 3–4).
+"""Rendimentos físicos esperados com pesos NLO assinados (`S`, `B`, `S/B`, `S/sqrt(B)`, Asimov nominal `Z_A`),
+incertezas estatísticas de Monte Carlo (`σ_MC = sqrt(Σ w_i^2)`) e Significance Ratio `σ_ratio` (Anzalone et al., Eq. 3–4).
 
 Separação metodológica:
-- `physical_yields` e `physical_significance_scan` preservam os pesos NLO originais com sinal
-  (`N_esperado = sum_i w_phys_i`) para estimar rendimentos físicos reais na luminosidade integrada
-  e calcular `S/B`, `S/sqrt(B)` e a significância de Asimov `Z_A`.
-  Apenas a localização do ponto de trabalho `thr(eff_sinal)` usa a distribuição não-negativa do sinal
-  para garantir monotonicidade estrita da eficiência.
+- `physical_yields` preserva os pesos NLO originais com sinal (`N_esperado = sum_i w_phys_i`) para estimar
+  rendimentos físicos reais na luminosidade integrada, reportando simultaneamente:
+    * `eff_s_pos`    : eficiência alcançada na convenção de pesos não-negativos (`Σ_sel w^+ / Σ_tot w^+`),
+    * `eff_s_signed` : eficiência física líquida com pesos NLO assinados (`Σ_sel w / Σ_tot w`),
+    * `S_err_mc`, `B_err_mc`, `sum_w2_S`, `sum_w2_B` : incerteza estatística MC NLO (`σ_MC^2 = Σ w_i^2`),
+    * `Z_asimov`     : significância de descoberta de Asimov NOMINAL calculada com `S` e `B` assinados
+      (sem parâmetros de nuisance sistemáticos ou estatísticos de MC; retorna `NaN` se `S <= 0` ou `B <= 0`).
 - `ams_significance_scan(..., balanced=True)` (métrica adimensional `σ_ratio` da Eq. 4 de Anzalone et al.)
-  opera como métrica pura de forma/classificação sobre pesos não-negativos normalizados (`Σw_s = Σw_b = 1`).
+  opera como métrica pura de forma/classificação sobre pesos não-negativos normalizados (`Σw_s = Σw_b = 1`),
+  com curvas acumuladas monotonicamente não-decrescentes.
 """
 
 from __future__ import annotations
@@ -22,8 +25,9 @@ from src.evaluation.roc import prepare_non_negative_weights
 
 
 def asimov_significance(s: float | np.ndarray, b: float | np.ndarray) -> float | np.ndarray:
-    """Significância de descoberta de Asimov (Cowan et al., EPJC 71, 1554):
-    `Z_A = sqrt(2 * ((s + b) * ln(1 + s / b) - s))` definida para `s > 0` e `b > 0`.
+    """Significância de descoberta de Asimov nominal (Cowan et al., EPJC 71, 1554):
+    `Z_A = sqrt(2 * ((s + b) * ln(1 + s / b) - s))` definida apenas para `s > 0` e `b > 0`
+    (retorna `NaN` caso `s <= 0` ou `b <= 0`; não incorpora incertezas sistemáticas/MC como nuisances).
     """
     s_arr = np.asarray(s, dtype=np.float64)
     b_arr = np.asarray(b, dtype=np.float64)
@@ -41,39 +45,75 @@ def physical_yields(
     sc: dict[float, dict[str, np.ndarray]],
     eff_points: Sequence[float] = (0.5, 0.8, 0.9),
 ) -> pd.DataFrame:
-    """Para cada κ_λ, determina o corte de score que retém `eff_sinal` (com pesos positivos monotônicos)
-    e calcula os rendimentos físicos esperados `S`, `B`, `S/B`, `S/sqrt(B)` e Asimov `Z_A`
-    preservando os pesos NLO originais com sinal (`w_phys`).
+    """Para cada κ_λ, determina o limiar de score correspondente ao working point `eff_sinal` na
+    convenção não-negativa (`w^+ = max(w_phys, 0)`) e avalia nos eventos selecionados:
+      - eficiências efetivas `eff_s_pos` (`w^+`) e `eff_s_signed` (`w_phys` assinado),
+      - rendimentos NLO assinados `S` e `B` com incertezas estatísticas de MC `S_err_mc` e `B_err_mc` (`sqrt(Σ w_i^2)`),
+      - `S/B` (com incerteza propagada `S/B_err_mc`), `S/sqrt(B)` e significância nominal de Asimov `Z_asimov`.
     """
     rows = []
     for k, d in sc.items():
         y, w_pos, s_pos_tot, _ = prepare_non_negative_weights(d["y"], d["w"])
         s = np.asarray(d["s"], dtype=np.float64)
         w_signed = np.asarray(d["w"], dtype=np.float64)
+        w2 = w_signed ** 2
 
         S_tot_signed = float(w_signed[y].sum())
         B_tot_signed = float(w_signed[~y].sum())
 
-        o = np.argsort(-s[y], kind="mergesort")
-        cum_pos = np.cumsum(w_pos[y][o]) / s_pos_tot
+        s_sig = s[y]
+        w_pos_sig = w_pos[y]
+        o = np.argsort(-s_sig, kind="mergesort")
+        s_sig_sorted = s_sig[o]
+        # Agrupa empates de score para refletir exatamente `s >= thr`
+        last = np.r_[np.flatnonzero(np.diff(s_sig_sorted)), len(s_sig_sorted) - 1]
+        cum_pos_unique = np.cumsum(w_pos_sig[o])[last] / s_pos_tot
+        s_thr_candidates = s_sig_sorted[last]
 
         for e in eff_points:
-            thr_idx = min(int(np.searchsorted(cum_pos, float(e))), len(cum_pos) - 1)
-            thr = float(s[y][o][thr_idx])
+            thr_idx = min(int(np.searchsorted(cum_pos_unique, float(e), side="left")), len(s_thr_candidates) - 1)
+            thr = float(s_thr_candidates[thr_idx])
             sel = s >= thr
-            S = float(w_signed[y & sel].sum())
-            B_raw = float(w_signed[(~y) & sel].sum())
+            sel_sig = y & sel
+            sel_bkg = (~y) & sel
+
+            eff_s_pos = float(w_pos[sel_sig].sum()) / s_pos_tot
+            S = float(w_signed[sel_sig].sum())
+            B_raw = float(w_signed[sel_bkg].sum())
+
+            sum_w2_S = float(w2[sel_sig].sum())
+            sum_w2_B = float(w2[sel_bkg].sum())
+            S_err_mc = float(np.sqrt(sum_w2_S))
+            B_err_mc = float(np.sqrt(sum_w2_B))
+
+            eff_s_signed = (S / S_tot_signed) if S_tot_signed > 0.0 else np.nan
+            eff_b_signed = (B_raw / B_tot_signed) if B_tot_signed > 0.0 else np.nan
+
             B_pos_valid = B_raw > 0.0
+            sb_val = (S / B_raw) if B_pos_valid else np.nan
+            if B_pos_valid and S > 0.0:
+                sb_err = abs(sb_val) * float(np.sqrt((S_err_mc / S) ** 2 + (B_err_mc / B_raw) ** 2))
+            else:
+                sb_err = np.nan
+
             rows.append(
                 {
                     "kappa": float(k),
                     "eff_sinal": float(e),
                     "corte": thr,
+                    "eff_s_pos": eff_s_pos,
+                    "eff_s_signed": eff_s_signed,
+                    "eff_b_signed": eff_b_signed,
                     "S_total": S_tot_signed,
                     "B_total": B_tot_signed,
                     "S": S,
+                    "S_err_mc": S_err_mc,
+                    "sum_w2_S": sum_w2_S,
                     "B": B_raw,
-                    "S/B": (S / B_raw) if B_pos_valid else np.nan,
+                    "B_err_mc": B_err_mc,
+                    "sum_w2_B": sum_w2_B,
+                    "S/B": sb_val,
+                    "S/B_err_mc": sb_err,
                     "S/sqrt(B)": (S / np.sqrt(B_raw)) if B_pos_valid and S > 0 else np.nan,
                     "Z_asimov": float(asimov_significance(S, B_raw)) if B_pos_valid and S > 0 else np.nan,
                 }
@@ -87,14 +127,29 @@ def compare_physical_yields(
     suffix_a: str = "_A",
     suffix_ref: str = "_AN",
 ) -> pd.DataFrame:
-    """Compara diretamente rendimentos físicos e significância de Asimov entre dois modelos (ex: AffinePNN vs DNN_AN)."""
-    cols = ["kappa", "eff_sinal", "corte", "S", "B", "S/B", "S/sqrt(B)", "Z_asimov"]
+    """Compara diretamente rendimentos físicos, incertezas MC e significância nominal de Asimov entre dois modelos."""
+    cols = [
+        "kappa",
+        "eff_sinal",
+        "corte",
+        "eff_s_pos",
+        "eff_s_signed",
+        "S",
+        "S_err_mc",
+        "B",
+        "B_err_mc",
+        "S/B",
+        "S/sqrt(B)",
+        "Z_asimov",
+    ]
     cols = [c for c in cols if c in yields_a.columns and c in yields_ref.columns]
     cmp = yields_a[cols].merge(yields_ref[cols], on=["kappa", "eff_sinal"], suffixes=(suffix_a, suffix_ref))
     if f"Z_asimov{suffix_a}" in cmp.columns:
         cmp["razao_Z_asimov"] = cmp[f"Z_asimov{suffix_a}"] / cmp[f"Z_asimov{suffix_ref}"].replace(0.0, np.nan)
     if f"B{suffix_a}" in cmp.columns:
-        cmp["reducao_B_fator"] = cmp[f"B{suffix_ref}"] / cmp[f"B{suffix_a}"].replace(0.0, np.nan)
+        b_a = cmp[f"B{suffix_a}"].where(cmp[f"B{suffix_a}"] > 0.0, np.nan)
+        b_ref = cmp[f"B{suffix_ref}"].where(cmp[f"B{suffix_ref}"] > 0.0, np.nan)
+        cmp["reducao_B_fator"] = b_ref / b_a
     return cmp
 
 
